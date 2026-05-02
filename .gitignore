@@ -1,0 +1,61 @@
+# Dependencies
+node_modules/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+.eggs/
+
+# Build outputs
+dist/
+out/
+release/
+/build/
+*.AppImage
+*.deb
+
+# PyInstaller
+dist/bridge-bin/
+/tmp/ci-pyinstaller/
+
+# Environment
+.env
+.env.*
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# App runtime data (user profiles — never commit real data)
+Chrome/
+~/.local/share/chrome-isolation-manager/
+
+# Secrets / cookies
+*.cookie
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+# Temp
+tmp/
+.tmp/
+
+# Markdown (keep only README)
+*.md
+!README.md

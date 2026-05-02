@@ -1,0 +1,62 @@
+{
+  "name": "chrome-isolation",
+  "version": "1.0.0",
+  "description": "Isolated Docker-backed Chrome profiles for GNOME Linux",
+  "main": "electron/main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder build --linux",
+    "build:appimage": "electron-builder build --linux AppImage",
+    "build:deb": "electron-builder build --linux deb",
+    "build:rpm": "electron-builder build --linux rpm"
+  },
+  "build": {
+    "appId": "io.chromeisolation.app",
+    "productName": "Chrome Isolation",
+    "linux": {
+      "target": [
+        { "target": "AppImage", "arch": ["x64"] },
+        { "target": "deb",      "arch": ["x64"] },
+        { "target": "rpm",      "arch": ["x64"] }
+      ],
+      "category": "Network",
+      "icon": "assets/icons/icon.png",
+      "maintainer": "MuhammadUsamaMX",
+      "synopsis": "Isolated Docker-backed Chrome profiles"
+    },
+    "appImage": {
+      "license": "LICENSE"
+    },
+    "deb": {
+      "depends": ["docker.io | docker-ce", "libgtk-3-0", "libnss3", "libxss1"]
+    },
+    "files": [
+      "electron/**/*",
+      "assets/**/*",
+      "!**/__pycache__/**"
+    ],
+    "extraResources": [
+      {
+        "from": "dist/bridge-bin/bridge",
+        "to": "bridge"
+      },
+      {
+        "from": "Dockerfile",
+        "to": "Dockerfile"
+      },
+      {
+        "from": "scripts/docker",
+        "to": "scripts/docker"
+      }
+    ],
+    "afterPack": "scripts/build/after-pack.js"
+  },
+  "keywords": ["chrome", "isolation", "docker", "profiles"],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^35.0.0",
+    "electron-builder": "^25.1.8"
+  },
+  "dependencies": {}
+}

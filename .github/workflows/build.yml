@@ -1,0 +1,150 @@
+name: Build & Release
+
+on:
+  push:
+    branches: [main]
+    tags:     ['v*.*.*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:          # manual trigger from GitHub UI
+
+permissions:
+  contents: write             # needed to create releases + upload assets
+
+jobs:
+  build:
+    name: Build binaries
+    runs-on: ubuntu-22.04     # glibc 2.35 — widest compatibility for AppImage
+
+    steps:
+      # ── Checkout ────────────────────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── Node.js ─────────────────────────────────────────────────────────────
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install npm dependencies
+        run: npm install --include=dev
+
+      # ── Python ──────────────────────────────────────────────────────────────
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install pyinstaller docker requests websocket-client
+
+      # ── Build bridge binary (PyInstaller) ───────────────────────────────────
+      - name: Bundle Python bridge
+        run: |
+          python -m PyInstaller \
+            --clean \
+            --distpath dist/bridge-bin \
+            --workpath /tmp/ci-pyinstaller \
+            bridge.spec
+          chmod +x dist/bridge-bin/bridge
+          echo "Bridge size: $(du -sh dist/bridge-bin/bridge | cut -f1)"
+
+      # ── System libs required by electron-builder for AppImage ───────────────
+      - name: Install AppImage/deb/rpm build dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends \
+            fuse libfuse2 \
+            libarchive-tools \
+            rpm rpmlint \
+            libopenjp2-7
+
+      # ── Build Electron packages ─────────────────────────────────────────────
+      - name: Build AppImage + .deb + .rpm
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: '1'   # no FUSE mount needed in CI
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          npx electron-builder --linux AppImage deb rpm \
+            --config.linux.artifactName="${{ github.event.repository.name }}-\${version}-linux-x64.\${ext}"
+
+      # ── List outputs ────────────────────────────────────────────────────────
+      - name: List dist/
+        run: |
+          find dist/ -maxdepth 1 \( -name '*.AppImage' -o -name '*.deb' -o -name '*.rpm' \) \
+            -exec ls -lh {} \;
+
+      # ── Upload as workflow artifacts (every push) ────────────────────────────
+      - name: Upload AppImage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: chrome-isolation-appimage
+          path: dist/*.AppImage
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload .deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: chrome-isolation-deb
+          path: dist/*.deb
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload .rpm artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: chrome-isolation-rpm
+          path: dist/*.rpm
+          if-no-files-found: error
+          retention-days: 30
+
+      # ── Create/update GitHub Release (only on version tags) ─────────────────
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Chrome Isolation Manager ${{ github.ref_name }}"
+          body: |
+            ## Installation
+
+            ### Any Linux (recommended)
+            ```bash
+            chmod +x chrome-isolation-*.AppImage
+            ./chrome-isolation-*.AppImage
+            ```
+            > Only **Docker** must be installed on the host — everything else is bundled.
+
+            ### Debian / Ubuntu / Mint
+            ```bash
+            sudo dpkg -i chrome-isolation-*.deb
+            sudo apt-get install -f          # resolve any missing system libs
+            ```
+
+            ### Fedora / RHEL / Rocky / AlmaLinux
+            ```bash
+            sudo rpm -i chrome-isolation-*.rpm
+            # or: sudo dnf localinstall chrome-isolation-*.rpm
+            ```
+
+            ### Install from source (Arch / Fedora / RHEL / openSUSE)
+            ```bash
+            git clone https://github.com/${{ github.repository }}.git
+            cd chrome-isolation
+            bash setup.sh
+            ```
+
+            ---
+            See [README](https://github.com/${{ github.repository }}#readme) for full documentation.
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}   # v1.0.0-beta → prerelease
+          files: |
+            dist/*.AppImage
+            dist/*.deb
+            dist/*.rpm
+          token: ${{ secrets.GITHUB_TOKEN }}
