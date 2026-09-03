@@ -7,7 +7,9 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('api', {
   profiles: {
     list:    ()              => ipcRenderer.invoke('profiles:list'),
-    create:  (name, path, hostMount) => ipcRenderer.invoke('profiles:create', name, path, hostMount),
+    create:  (name, path, hostMount, proxy) => ipcRenderer.invoke('profiles:create', name, path, hostMount, proxy),
+    update:  (name, hostMount, proxy) => ipcRenderer.invoke('profiles:update', name, hostMount, proxy),
+    pickFolder: ()           => ipcRenderer.invoke('profiles:pickFolder'),
     delete:  (name)         => ipcRenderer.invoke('profiles:delete', name),
     start:   (name)         => ipcRenderer.invoke('profiles:start',  name),
     stop:    (name)         => ipcRenderer.invoke('profiles:stop',   name),

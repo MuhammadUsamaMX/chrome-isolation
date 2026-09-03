@@ -3,12 +3,13 @@ Profile service — high-level operations used by the IPC bridge.
 All inputs go through validator.py before any filesystem or Docker call.
 """
 import os
+import re
 import shutil
 
 from config import CHROME_PROFILES_DIR
 from validator import validate_profile_name, safe_profile_path
 from registry import (
-    list_profiles, get_profile, register_profile,
+    list_profiles, get_profile, register_profile, update_profile as _update_registry,
     unregister_profile, resolve_profile_path,
 )
 from docker_manager import DockerManager
@@ -18,6 +19,21 @@ from desktop_manager import (
 from archive import import_profile as _import_archive, export_profile as _export_archive
 
 _docker = DockerManager()
+
+# socks5://host:port, socks5h://host:port, http://host:port, https://host:port
+# with optional user:pass@ credentials.
+_PROXY_RE = re.compile(
+    r'^(socks5|socks5h|http|https)://([^:@/]+(:[^:@/]+)?@)?[a-zA-Z0-9._-]+:\d{1,5}$'
+)
+
+
+def _validate_proxy(proxy: str) -> str:
+    proxy = proxy.strip()
+    if proxy and not _PROXY_RE.match(proxy):
+        raise ValueError(
+            "Invalid proxy. Use e.g. socks5://127.0.0.1:1080 or http://user:pass@host:8080"
+        )
+    return proxy
 
 
 def get_all_profiles() -> list:
@@ -45,6 +61,7 @@ def get_all_profiles() -> list:
             'name': p['name'],
             'path': p['path'],
             'host_mount': p.get('host_mount', ''),
+            'proxy': p.get('proxy', ''),
             'created_at': p.get('created_at', ''),
             'status': _docker.container_status(p['name']),
             'size_mb': _docker.profile_size_mb(p['name']),
@@ -53,7 +70,7 @@ def get_all_profiles() -> list:
     return profiles
 
 
-def create_profile(name: str, custom_path: str = '', host_mount: str = '') -> dict:
+def create_profile(name: str, custom_path: str = '', host_mount: str = '', proxy: str = '') -> dict:
     name = validate_profile_name(name)
 
     if custom_path:
@@ -71,12 +88,32 @@ def create_profile(name: str, custom_path: str = '', host_mount: str = '') -> di
         if not os.path.isdir(host_mount):
             raise ValueError(f"Host folder not found: {host_mount}")
 
+    proxy = _validate_proxy(proxy)
+
     os.makedirs(path, exist_ok=True)
     os.makedirs(os.path.join(path, 'Downloads'), exist_ok=True)
 
-    entry = register_profile(name, path, host_mount)
+    entry = register_profile(name, path, host_mount, proxy)
     create_desktop_entry(name)
     return entry
+
+
+def update_profile(name: str, host_mount: str = None, proxy: str = None) -> dict:
+    """Update a profile's read-only host mount and/or proxy. Empty string
+    clears the field (host mount falls back to the home directory)."""
+    name = validate_profile_name(name)
+
+    if host_mount is not None:
+        host_mount = host_mount.strip()
+        if host_mount:
+            host_mount = os.path.realpath(os.path.expanduser(host_mount))
+            if not os.path.isdir(host_mount):
+                raise ValueError(f"Host folder not found: {host_mount}")
+
+    if proxy is not None:
+        proxy = _validate_proxy(proxy)
+
+    return _update_registry(name, host_mount=host_mount, proxy=proxy)
 
 
 def delete_profile(name: str) -> dict:

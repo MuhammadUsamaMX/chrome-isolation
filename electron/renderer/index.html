@@ -145,13 +145,48 @@
                  autocomplete="off">
         </label>
         <label>Host Folder <span class="opt">(read-only, optional)</span>
-          <input type="text" id="inputHostMount" placeholder="Leave empty to mount your home directory"
-                 autocomplete="off">
+          <div class="input-row">
+            <input type="text" id="inputHostMount" placeholder="Leave empty to mount your home directory"
+                   autocomplete="off">
+            <button type="button" class="btn btn-secondary btn-sm" id="btnBrowseCreate">Browse…</button>
+          </div>
           <small>Mounted read-only at /home/chrome/host inside the container.</small>
+        </label>
+        <label>Proxy <span class="opt">(optional)</span>
+          <input type="text" id="inputProxy" placeholder="e.g. socks5://127.0.0.1:1080"
+                 autocomplete="off">
+          <small>Routes this profile's traffic through a different IP. Loopback is rewritten to the host automatically.</small>
         </label>
         <div class="modal-actions">
           <button type="button" class="btn btn-secondary" id="btnCreateCancel">Cancel</button>
           <button type="submit" class="btn btn-primary">Create</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Edit modal -->
+  <div class="modal-overlay" id="modalEdit" style="display:none;">
+    <div class="modal">
+      <h2 id="editTitle">Edit Profile</h2>
+      <p class="modal-sub">Update the read-only host folder and proxy.</p>
+      <form id="editForm">
+        <label>Host Folder <span class="opt">(read-only, optional)</span>
+          <div class="input-row">
+            <input type="text" id="editHostMount" placeholder="Leave empty to mount your home directory"
+                   autocomplete="off">
+            <button type="button" class="btn btn-secondary btn-sm" id="btnBrowseEdit">Browse…</button>
+          </div>
+          <small>Mounted read-only at /home/chrome/host inside the container.</small>
+        </label>
+        <label>Proxy <span class="opt">(optional)</span>
+          <input type="text" id="editProxy" placeholder="e.g. socks5://127.0.0.1:1080"
+                 autocomplete="off">
+          <small>Routes this profile's traffic through a different IP.</small>
+        </label>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-secondary" id="btnEditCancel">Cancel</button>
+          <button type="submit" class="btn btn-primary">Save</button>
         </div>
       </form>
     </div>

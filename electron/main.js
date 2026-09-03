@@ -249,13 +249,32 @@ function callBackend(method, params = {}) {
 function registerIpc() {
   ipcMain.handle('profiles:list', () => callBackend('list_profiles'));
 
-  ipcMain.handle('profiles:create', (_, name, customPath, hostMount) =>
+  ipcMain.handle('profiles:create', (_, name, customPath, hostMount, proxy) =>
     callBackend('create_profile', {
       name,
       custom_path: customPath || '',
       host_mount: hostMount || '',
+      proxy: proxy || '',
     })
   );
+
+  ipcMain.handle('profiles:update', (_, name, hostMount, proxy) =>
+    callBackend('update_profile', {
+      name,
+      host_mount: hostMount || '',
+      proxy: proxy || '',
+    })
+  );
+
+  // Native folder picker for the read-only host mount field
+  ipcMain.handle('profiles:pickFolder', async () => {
+    const { filePaths, canceled } = await dialog.showOpenDialog(mainWindow, {
+      title: 'Select host folder (mounted read-only)',
+      properties: ['openDirectory'],
+    });
+    if (canceled || !filePaths.length) return { canceled: true };
+    return { canceled: false, path: filePaths[0] };
+  });
 
   ipcMain.handle('profiles:delete', (_, name) =>
     callBackend('delete_profile', { name })

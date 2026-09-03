@@ -65,6 +65,33 @@ def test_host_mount_round_trip():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_update_profile():
+    tmp = _setup()
+    try:
+        registry.register_profile('erin', os.path.join(registry.CHROME_PROFILES_DIR, 'erin'))
+        host = os.path.join(tmp, 'host-files')
+        os.makedirs(host, exist_ok=True)
+
+        # Update both fields
+        entry = registry.update_profile('erin', host_mount=host, proxy='socks5://127.0.0.1:1080')
+        assert entry['host_mount'] == host, entry
+        assert entry['proxy'] == 'socks5://127.0.0.1:1080', entry
+
+        # None leaves a field unchanged
+        entry = registry.update_profile('erin', proxy='')
+        assert entry['host_mount'] == host, entry
+        assert entry['proxy'] == '', entry
+
+        # Unknown profile rejected
+        try:
+            registry.update_profile('nobody', host_mount=host)
+            assert False, "expected ValueError for unknown profile"
+        except ValueError:
+            pass
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_resolve_fallback():
     tmp = _setup()
     try:

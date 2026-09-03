@@ -79,6 +79,7 @@ function renderProfiles(profiles) {
         <span>Storage: ${p.size_mb ?? 0} MB</span>
         <span>Desktop: ${p.has_desktop_entry ? 'Yes' : 'No'}</span>
         <span>Host: ${p.host_mount ? esc(p.host_mount) : '~'}</span>
+        <span>Proxy: ${p.proxy ? esc(p.proxy) : 'None'}</span>
         ${p.created_at ? `<span>Created: ${esc(p.created_at.replace('T',' ').replace('Z',''))}</span>` : ''}
       </div>
       <div class="card-actions">
@@ -86,12 +87,13 @@ function renderProfiles(profiles) {
           ? `<button class="btn btn-danger btn-sm"   data-action="stop">Stop</button>`
           : `<button class="btn btn-success btn-sm"  data-action="start">Launch</button>`}
         <button class="btn btn-secondary btn-sm" data-action="export">Export</button>
+        <button class="btn btn-secondary btn-sm" data-action="edit">Edit</button>
         <button class="btn btn-danger btn-sm"    data-action="delete">Delete</button>
       </div>
     `;
 
     card.querySelectorAll('[data-action]').forEach(btn => {
-      btn.addEventListener('click', () => handleAction(btn.dataset.action, p.name));
+      btn.addEventListener('click', () => handleAction(btn.dataset.action, p));
     });
 
     grid.appendChild(card);
@@ -109,7 +111,8 @@ async function loadProfiles() {
 }
 
 // ── Action dispatcher ─────────────────────────────────────────────────────────
-async function handleAction(action, name) {
+async function handleAction(action, profile) {
+  const name = profile.name;
   try {
     switch (action) {
       case 'start': {
@@ -127,6 +130,10 @@ async function handleAction(action, name) {
         const r = await window.api.profiles.export(name);
         if (r && !r.canceled) toast(`Exported to ${r.path}`, 'success');
         break;
+      }
+      case 'edit': {
+        openEdit(profile);
+        return; // no reload needed
       }
       case 'delete': {
         const ok = await confirm('Delete Profile', `Delete "${name}" and all its data? This cannot be undone.`);
@@ -158,15 +165,60 @@ document.getElementById('createForm').addEventListener('submit', async (e) => {
   const name = document.getElementById('inputName').value.trim();
   const path = document.getElementById('inputPath').value.trim();
   const hostMount = document.getElementById('inputHostMount').value.trim();
+  const proxy = document.getElementById('inputProxy').value.trim();
   if (!name) return;
   try {
-    await window.api.profiles.create(name, path, hostMount);
+    await window.api.profiles.create(name, path, hostMount, proxy);
     toast(`Profile "${name}" created.`, 'success');
     document.getElementById('modalCreate').style.display = 'none';
     document.getElementById('createForm').reset();
     await loadProfiles();
   } catch (e) {
     toast(`Failed to create: ${e.message}`, 'error');
+  }
+});
+
+// ── Browse (native folder picker) ─────────────────────────────────────────────
+async function browseFolder(inputId) {
+  try {
+    const r = await window.api.pickFolder();
+    if (r && !r.canceled) document.getElementById(inputId).value = r.path;
+  } catch (e) {
+    toast(`Folder picker failed: ${e.message}`, 'error');
+  }
+}
+document.getElementById('btnBrowseCreate').addEventListener('click', () => browseFolder('inputHostMount'));
+document.getElementById('btnBrowseEdit').addEventListener('click', () => browseFolder('editHostMount'));
+
+// ── Edit modal ────────────────────────────────────────────────────────────────
+let editingName = null;
+
+function openEdit(profile) {
+  editingName = profile.name;
+  document.getElementById('editTitle').textContent = `Edit ${profile.name}`;
+  document.getElementById('editHostMount').value = profile.host_mount || '';
+  document.getElementById('editProxy').value = profile.proxy || '';
+  document.getElementById('modalEdit').style.display = 'flex';
+}
+
+document.getElementById('btnEditCancel').addEventListener('click', () => {
+  document.getElementById('modalEdit').style.display = 'none';
+  editingName = null;
+});
+
+document.getElementById('editForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  if (!editingName) return;
+  const hostMount = document.getElementById('editHostMount').value.trim();
+  const proxy = document.getElementById('editProxy').value.trim();
+  try {
+    await window.api.profiles.update(editingName, hostMount, proxy);
+    toast(`"${editingName}" updated.`, 'success');
+    document.getElementById('modalEdit').style.display = 'none';
+    editingName = null;
+    await loadProfiles();
+  } catch (err) {
+    toast(`Update failed: ${err.message}`, 'error');
   }
 });
 

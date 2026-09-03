@@ -318,6 +318,8 @@ body {
 .modal small { font-size: .72rem; color: var(--text2); }
 .opt { font-weight: 400; color: var(--text2); }
 .modal-actions { display: flex; justify-content: flex-end; gap: .75rem; margin-top: .5rem; }
+.input-row { display: flex; gap: .5rem; }
+.input-row input[type="text"] { flex: 1; min-width: 0; }
 
 /* ── Toasts ────────────────────────────────────────────────── */
 #toasts {

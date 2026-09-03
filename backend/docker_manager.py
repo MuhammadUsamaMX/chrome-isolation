@@ -125,6 +125,23 @@ class DockerManager:
         device_gids = self._device_group_ids()
         hostname = self._profile_hostname(profile_name)
 
+        # Per-profile proxy (optional) — routes the profile's traffic through a
+        # different egress IP. Loopback addresses are rewritten to
+        # host.docker.internal so the container reaches a proxy running on the
+        # host; WebRTC is forced through the proxy to avoid IP leaks.
+        entry = get_profile(profile_name)
+        proxy = (entry or {}).get('proxy', '')
+        command = [f'--class=chrome-{profile_name}']
+        extra_hosts = None
+        if proxy:
+            proxy = proxy.replace('127.0.0.1', 'host.docker.internal') \
+                           .replace('localhost', 'host.docker.internal')
+            command += [
+                f'--proxy-server={proxy}',
+                '--webrtc-ip-handling-policy=disable_non_proxied_udp',
+            ]
+            extra_hosts = {'host.docker.internal': 'host-gateway'}
+
         run_kwargs = dict(
             image=DOCKER_IMAGE_NAME,
             name=cname,
@@ -140,10 +157,10 @@ class DockerManager:
             group_add=device_gids,
             # No privileged, no SYS_ADMIN, no ipc=host.
             # GPU backend flags are chosen per-profile in stealth-launch.sh.
-            command=[
-                f'--class=chrome-{profile_name}',
-            ]
+            command=command,
         )
+        if extra_hosts:
+            run_kwargs['extra_hosts'] = extra_hosts
         # GPU access only when the host actually exposes /dev/dri
         if os.path.exists('/dev/dri'):
             run_kwargs['devices'] = ['/dev/dri']

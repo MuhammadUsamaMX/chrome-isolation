@@ -40,7 +40,7 @@ def get_profile(name: str) -> Optional[dict]:
     return _load().get(name)
 
 
-def register_profile(name: str, path: str, host_mount: str = '') -> dict:
+def register_profile(name: str, path: str, host_mount: str = '', proxy: str = '') -> dict:
     """Add a profile to the registry. Raises if already registered."""
     name = validate_profile_name(name)
     data = _load()
@@ -50,9 +50,25 @@ def register_profile(name: str, path: str, host_mount: str = '') -> dict:
         "name": name,
         "path": path,
         "host_mount": host_mount,
+        "proxy": proxy,
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
     data[name] = entry
+    _save(data)
+    return entry
+
+
+def update_profile(name: str, host_mount: str = None, proxy: str = None) -> dict:
+    """Update mutable profile settings. None leaves a field unchanged."""
+    name = validate_profile_name(name)
+    data = _load()
+    if name not in data:
+        raise ValueError(f"Profile '{name}' not found.")
+    entry = data[name]
+    if host_mount is not None:
+        entry['host_mount'] = host_mount
+    if proxy is not None:
+        entry['proxy'] = proxy
     _save(data)
     return entry
 

@@ -18,18 +18,22 @@ export TZ="$CHROME_TIMEZONE"
 export LANG="${CHROME_LANGUAGE//-/_}.UTF-8"
 export LC_ALL="$LANG"
 
-# Build dark-mode feature flag based on host colour scheme injected by docker_manager
-FEATURES="WaylandWindowDecorations,UseOzonePlatform,VulkanFromANGLE,DefaultANGLEVulkan"
+# Build feature flags based on host colour scheme injected by docker_manager.
+# Vulkan features only apply to real-GPU profiles — forcing DefaultANGLEVulkan
+# on a SwiftShader profile would defeat the software-rendering choice.
+FEATURES="WaylandWindowDecorations,UseOzonePlatform"
+case "${CHROME_GPU_MODE:-vulkan}" in
+    swiftshader)
+        GL_FLAGS=("--use-gl=angle" "--use-angle=swiftshader")
+        ;;
+    *)
+        FEATURES="$FEATURES,VulkanFromANGLE,DefaultANGLEVulkan"
+        GL_FLAGS=("--use-gl=angle" "--use-angle=vulkan")
+        ;;
+esac
 if [[ "${HOST_COLOR_SCHEME:-dark}" == "dark" ]]; then
     FEATURES="$FEATURES,WebContentsForceDark"
 fi
-
-# Per-profile GPU backend: real GPU via ANGLE/Vulkan, or software SwiftShader
-# (a machine without a usable GPU). Renderer string differs accordingly.
-case "${CHROME_GPU_MODE:-vulkan}" in
-    swiftshader) GL_FLAGS=("--use-gl=angle" "--use-angle=swiftshader") ;;
-    *)           GL_FLAGS=("--use-gl=angle" "--use-angle=vulkan") ;;
-esac
 
 # Clamp the spoofed core count to what the host actually exposes, then pin the
 # process to that many CPUs. Chromium reads sched_getaffinity, so

@@ -101,6 +101,75 @@ def test_create_with_host_mount_round_trip():
         shutil.rmtree(host_tmp, ignore_errors=True)
 
 
+def test_update_profile_round_trip():
+    """create with proxy -> update host_mount+proxy -> listed -> deleted."""
+    proc = None
+    host_tmp = tempfile.mkdtemp(prefix='bridge-host-')
+    name = f"bridge-upd-{os.getpid()}"
+    try:
+        proc = _spawn_bridge()
+        resps = _exchange(proc, [
+            {"id": "6", "method": "create_profile",
+             "params": {"name": name, "proxy": "socks5://127.0.0.1:1080"}},
+            {"id": "7", "method": "update_profile",
+             "params": {"name": name, "host_mount": host_tmp, "proxy": "socks5://127.0.0.1:9050"}},
+            {"id": "8", "method": "list_profiles", "params": {}},
+            {"id": "9", "method": "delete_profile", "params": {"name": name}},
+        ])
+        proc.stdin.close()
+        proc.wait(timeout=30)
+        err = proc.stderr.read()
+        assert proc.returncode == 0, f"bridge exited {proc.returncode}: {err}"
+
+        # create -> proxy stored
+        assert resps[0]['id'] == '6', resps[0]
+        assert 'error' not in resps[0], resps[0]
+        assert resps[0]['result']['proxy'] == 'socks5://127.0.0.1:1080', resps[0]
+
+        # update -> both fields changed
+        assert resps[1]['id'] == '7', resps[1]
+        assert 'error' not in resps[1], resps[1]
+        assert resps[1]['result']['host_mount'] == host_tmp, resps[1]
+        assert resps[1]['result']['proxy'] == 'socks5://127.0.0.1:9050', resps[1]
+
+        # list -> reflects the update
+        assert resps[2]['id'] == '8', resps[2]
+        found = [p for p in resps[2]['result'] if p['name'] == name]
+        assert len(found) == 1, resps[2]
+        assert found[0]['host_mount'] == host_tmp, found
+        assert found[0]['proxy'] == 'socks5://127.0.0.1:9050', found
+
+        # delete -> gone
+        assert resps[3]['id'] == '9', resps[3]
+        assert resps[3]['result']['status'] == 'deleted', resps[3]
+    finally:
+        if proc and proc.poll() is None:
+            proc.kill()
+        shutil.rmtree(host_tmp, ignore_errors=True)
+
+
+def test_invalid_proxy_rejected():
+    proc = None
+    name = f"bridge-bad-{os.getpid()}"
+    try:
+        proc = _spawn_bridge()
+        resps = _exchange(proc, [
+            {"id": "10", "method": "create_profile",
+             "params": {"name": name, "proxy": "not-a-proxy"}},
+        ])
+        proc.stdin.close()
+        proc.wait(timeout=30)
+        err = proc.stderr.read()
+        assert proc.returncode == 0, f"bridge exited {proc.returncode}: {err}"
+
+        assert resps[0]['id'] == '10', resps[0]
+        assert 'error' in resps[0], resps[0]
+        assert 'Invalid proxy' in resps[0]['error'], resps[0]
+    finally:
+        if proc and proc.poll() is None:
+            proc.kill()
+
+
 def main():
     tests = [(n, f) for n, f in sorted(globals().items())
              if n.startswith('test_') and callable(f)]

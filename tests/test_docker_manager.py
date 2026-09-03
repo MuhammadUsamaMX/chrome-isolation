@@ -208,6 +208,33 @@ def test_start_container_command():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_start_container_proxy():
+    m, tmp = _make_manager()
+    try:
+        # Register a profile with a loopback proxy — must be rewritten to
+        # host.docker.internal and add the host-gateway alias.
+        registry.register_profile(
+            'proxied', os.path.join(registry.CHROME_PROFILES_DIR, 'proxied'),
+            proxy='socks5://127.0.0.1:1080')
+        result = m.start_container('proxied')
+        assert result['status'] == 'started', result
+        kwargs = m.client.containers.run_kwargs
+
+        cmd = kwargs['command']
+        assert '--proxy-server=socks5://host.docker.internal:1080' in cmd, cmd
+        assert '--webrtc-ip-handling-policy=disable_non_proxied_udp' in cmd, cmd
+        assert kwargs.get('extra_hosts') == {'host.docker.internal': 'host-gateway'}, kwargs
+
+        # A profile without a proxy gets no proxy flags and no extra_hosts
+        registry.register_profile('plain', os.path.join(registry.CHROME_PROFILES_DIR, 'plain'))
+        m.start_container('plain')
+        kwargs2 = m.client.containers.run_kwargs
+        assert not any('--proxy-server' in c for c in kwargs2['command']), kwargs2
+        assert 'extra_hosts' not in kwargs2, kwargs2
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_profile_size_cache():
     m, tmp = _make_manager()
     try:
