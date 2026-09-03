@@ -73,6 +73,7 @@
             <path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/>
           </svg>
           Profiles
+          <span class="nav-count" id="navCount">0</span>
         </button>
       </nav>
 
@@ -100,17 +101,80 @@
     <!-- Main content -->
     <main class="content">
       <header class="content-header">
-        <h1>Profiles</h1>
-        <button class="icon-btn" id="btnRefresh" title="Refresh">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
-               stroke="currentColor" stroke-width="2">
-            <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/>
-            <path d="M21 3v5h-5"/>
-            <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/>
-            <path d="M3 21v-5h5"/>
-          </svg>
-        </button>
+        <div class="header-title">
+          <h1>Profiles</h1>
+          <p class="header-sub" id="headerSub">Isolated browser machines</p>
+        </div>
+        <div class="header-actions">
+          <div class="search-box">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" stroke-width="2" stroke-linecap="round">
+              <circle cx="11" cy="11" r="7"/>
+              <line x1="21" y1="21" x2="16.5" y2="16.5"/>
+            </svg>
+            <input type="text" id="inputSearch" placeholder="Search profiles…" autocomplete="off">
+          </div>
+          <button class="icon-btn" id="btnRefresh" title="Refresh">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" stroke-width="2">
+              <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/>
+              <path d="M21 3v5h-5"/>
+              <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/>
+              <path d="M3 21v-5h5"/>
+            </svg>
+          </button>
+        </div>
       </header>
+
+      <!-- Dashboard stats -->
+      <div class="stats-row" id="statsRow">
+        <div class="stat-card">
+          <span class="stat-icon stat-total">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/>
+            </svg>
+          </span>
+          <div class="stat-text">
+            <span class="stat-value" id="statTotal">0</span>
+            <span class="stat-label">Profiles</span>
+          </div>
+        </div>
+        <div class="stat-card">
+          <span class="stat-icon stat-running">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polygon points="6 3 20 12 6 21 6 3"/>
+            </svg>
+          </span>
+          <div class="stat-text">
+            <span class="stat-value" id="statRunning">0</span>
+            <span class="stat-label">Running</span>
+          </div>
+        </div>
+        <div class="stat-card">
+          <span class="stat-icon stat-stopped">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="6" y="6" width="12" height="12" rx="2"/>
+            </svg>
+          </span>
+          <div class="stat-text">
+            <span class="stat-value" id="statStopped">0</span>
+            <span class="stat-label">Stopped</span>
+          </div>
+        </div>
+        <div class="stat-card">
+          <span class="stat-icon stat-storage">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <ellipse cx="12" cy="5" rx="8" ry="3"/>
+              <path d="M4 5v14c0 1.66 3.58 3 8 3s8-1.34 8-3V5"/>
+              <path d="M4 12c0 1.66 3.58 3 8 3s8-1.34 8-3"/>
+            </svg>
+          </span>
+          <div class="stat-text">
+            <span class="stat-value" id="statStorage">0 MB</span>
+            <span class="stat-label">Storage</span>
+          </div>
+        </div>
+      </div>
 
       <div id="profilesGrid" class="profiles-grid">
         <div class="empty-state" id="emptyState" style="display:none;">

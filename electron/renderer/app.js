@@ -46,6 +46,8 @@ function esc(s) {
 }
 
 // ── Render profile cards ──────────────────────────────────────────────────────
+let lastProfiles = [];
+
 function renderProfiles(profiles) {
   const grid = document.getElementById('profilesGrid');
   const empty = document.getElementById('emptyState');
@@ -55,20 +57,34 @@ function renderProfiles(profiles) {
   // Remove all existing cards (not the empty/loading sentinels)
   grid.querySelectorAll('.profile-card').forEach(c => c.remove());
 
-  if (!profiles.length) {
+  const query = (document.getElementById('inputSearch').value || '').toLowerCase();
+  const filtered = query
+    ? profiles.filter(p => p.name.toLowerCase().includes(query))
+    : profiles;
+
+  if (!filtered.length) {
     empty.style.display = 'flex';
+    empty.querySelector('p').textContent = query
+      ? `No profiles match "${query}"`
+      : 'No profiles yet. Create one to get started.';
     return;
   }
   empty.style.display = 'none';
 
-  profiles.forEach(p => {
+  // Storage bar scale — relative to the largest profile in the current view
+  const maxSize = Math.max(1, ...filtered.map(p => p.size_mb || 0));
+
+  filtered.forEach((p, i) => {
     const card = document.createElement('div');
     card.className = 'profile-card';
     card.dataset.name = p.name;
+    card.style.animationDelay = `${Math.min(i * 40, 400)}ms`;
 
     const status = p.status || 'not_found';
     const label  = STATUS_LABEL[status] || status;
     const isRunning = status === 'running';
+    const sizeMb = p.size_mb || 0;
+    const barPct = Math.min(100, Math.max(3, (sizeMb / maxSize) * 100));
 
     // Machine identity chips from the profile's hardware signature
     const m = p.machine || {};
@@ -86,10 +102,12 @@ function renderProfiles(profiles) {
       </div>
       ${chips.length ? `<div class="card-chips">${chips.map(c => `<span class="chip">${esc(c)}</span>`).join('')}</div>` : ''}
       <div class="card-meta">
-        <span>Storage: ${p.size_mb ?? 0} MB</span>
         <span>Host: ${p.host_mount ? esc(p.host_mount) : '~'}</span>
         <span>Proxy: ${p.proxy ? esc(p.proxy) : 'None'}</span>
         ${p.created_at ? `<span>Created: ${esc(p.created_at.replace('T',' ').replace('Z',''))}</span>` : ''}
+      </div>
+      <div class="storage-bar" title="${sizeMb} MB">
+        <div class="storage-fill" style="width:${barPct}%"></div>
       </div>
       <div class="card-actions">
         ${isRunning
@@ -109,11 +127,30 @@ function renderProfiles(profiles) {
   });
 }
 
+// ── Dashboard stats ───────────────────────────────────────────────────────────
+function renderStats(profiles) {
+  const total = profiles.length;
+  const running = profiles.filter(p => p.status === 'running').length;
+  const stopped = profiles.filter(p => p.status === 'exited').length;
+  const storage = profiles.reduce((s, p) => s + (p.size_mb || 0), 0);
+
+  document.getElementById('statTotal').textContent = total;
+  document.getElementById('statRunning').textContent = running;
+  document.getElementById('statStopped').textContent = stopped;
+  document.getElementById('statStorage').textContent =
+    storage >= 1024 ? `${(storage / 1024).toFixed(1)} GB` : `${Math.round(storage)} MB`;
+  document.getElementById('navCount').textContent = total;
+  document.getElementById('headerSub').textContent =
+    total ? `${running} running · ${total} total` : 'Isolated browser machines';
+}
+
 // ── Load profiles ─────────────────────────────────────────────────────────────
 async function loadProfiles() {
   try {
     const profiles = await window.api.profiles.list();
-    renderProfiles(Array.isArray(profiles) ? profiles : []);
+    lastProfiles = Array.isArray(profiles) ? profiles : [];
+    renderStats(lastProfiles);
+    renderProfiles(lastProfiles);
   } catch (e) {
     toast(`Failed to load profiles: ${e.message}`, 'error');
   }
@@ -246,6 +283,11 @@ document.getElementById('btnImport').addEventListener('click', async () => {
 
 // ── Refresh ───────────────────────────────────────────────────────────────────
 document.getElementById('btnRefresh').addEventListener('click', loadProfiles);
+
+// ── Search (filters the cached list locally, no backend round-trip) ──────────
+document.getElementById('inputSearch').addEventListener('input', () => {
+  renderProfiles(lastProfiles);
+});
 
 // ── Auto-refresh every 5 s ────────────────────────────────────────────────────
 setInterval(loadProfiles, 5000);
