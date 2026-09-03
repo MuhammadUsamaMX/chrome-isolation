@@ -47,6 +47,7 @@ function esc(s) {
 
 // ── Render profile cards ──────────────────────────────────────────────────────
 let lastProfiles = [];
+let currentFilter = 'all'; // all | running | stopped
 
 function renderProfiles(profiles) {
   const grid = document.getElementById('profilesGrid');
@@ -58,9 +59,11 @@ function renderProfiles(profiles) {
   grid.querySelectorAll('.profile-card').forEach(c => c.remove());
 
   const query = (document.getElementById('inputSearch').value || '').toLowerCase();
-  const filtered = query
+  let filtered = query
     ? profiles.filter(p => p.name.toLowerCase().includes(query))
     : profiles;
+  if (currentFilter === 'running') filtered = filtered.filter(p => p.status === 'running');
+  else if (currentFilter === 'stopped') filtered = filtered.filter(p => p.status !== 'running');
 
   if (!filtered.length) {
     empty.style.display = 'flex';
@@ -139,9 +142,19 @@ function renderStats(profiles) {
   document.getElementById('statStopped').textContent = stopped;
   document.getElementById('statStorage').textContent =
     storage >= 1024 ? `${(storage / 1024).toFixed(1)} GB` : `${Math.round(storage)} MB`;
-  document.getElementById('navCount').textContent = total;
+  document.getElementById('navCountAll').textContent = total;
+  document.getElementById('navCountRunning').textContent = running;
+  document.getElementById('navCountStopped').textContent = total - running;
   document.getElementById('headerSub').textContent =
     total ? `${running} running · ${total} total` : 'Isolated browser machines';
+}
+
+// ── Sidebar connection status ─────────────────────────────────────────────────
+function setStatus(ok) {
+  const dot = document.getElementById('statusDot');
+  const text = document.getElementById('statusText');
+  dot.className = `status-dot ${ok ? 'on' : 'off'}`;
+  text.textContent = ok ? 'Connected' : 'Offline';
 }
 
 // ── Load profiles ─────────────────────────────────────────────────────────────
@@ -149,9 +162,11 @@ async function loadProfiles() {
   try {
     const profiles = await window.api.profiles.list();
     lastProfiles = Array.isArray(profiles) ? profiles : [];
+    setStatus(true);
     renderStats(lastProfiles);
     renderProfiles(lastProfiles);
   } catch (e) {
+    setStatus(false);
     toast(`Failed to load profiles: ${e.message}`, 'error');
   }
 }
@@ -287,6 +302,15 @@ document.getElementById('btnRefresh').addEventListener('click', loadProfiles);
 // ── Search (filters the cached list locally, no backend round-trip) ──────────
 document.getElementById('inputSearch').addEventListener('input', () => {
   renderProfiles(lastProfiles);
+});
+
+// ── Sidebar filters (All / Running / Stopped) ─────────────────────────────────
+document.querySelectorAll('.nav-item[data-filter]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    currentFilter = btn.dataset.filter;
+    document.querySelectorAll('.nav-item').forEach(b => b.classList.toggle('active', b === btn));
+    renderProfiles(lastProfiles);
+  });
 });
 
 // ── Auto-refresh every 5 s ────────────────────────────────────────────────────
