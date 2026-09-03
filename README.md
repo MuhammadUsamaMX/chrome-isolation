@@ -128,7 +128,7 @@ chrome-isolation
 Click **New Profile** in the sidebar. Give it a name (letters, numbers, dash, underscore). Optionally set a custom storage path, a **Host Folder** — a directory from your machine mounted read-only into the container at `/home/chrome/host` (leave empty to mount your home directory; use **Browse…** to pick it with the file manager) — and a **Proxy** such as `socks5://127.0.0.1:1080` or `socks5://user:pass@proxy.example.com:1080` to route the profile through a different IP.
 
 ### Edit a profile
-Click **Edit** on any profile card to change the read-only host folder and proxy after creation. Changes apply the next time the profile is launched.
+Click **Edit** on any profile card to change the read-only host folder, proxy, and machine timezone after creation. Changes apply the next time the profile is launched.
 
 ### Launch Chrome
 Click **Launch** on any profile card. A Docker container starts and Chromium opens on your Wayland display. The container uses your host fonts, icons, and GTK theme (read-only), and presents the profile's own machine fingerprint (CPU cores, language, GPU backend, timezone, user-agent, hostname, window size).

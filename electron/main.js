@@ -258,11 +258,12 @@ function registerIpc() {
     })
   );
 
-  ipcMain.handle('profiles:update', (_, name, hostMount, proxy) =>
+  ipcMain.handle('profiles:update', (_, name, hostMount, proxy, timezone) =>
     callBackend('update_profile', {
       name,
       host_mount: hostMount || '',
       proxy: proxy || '',
+      timezone: timezone || '',
     })
   );
 

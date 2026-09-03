@@ -259,6 +259,7 @@ function openEdit(profile) {
   document.getElementById('editTitle').textContent = `Edit ${profile.name}`;
   document.getElementById('editHostMount').value = profile.host_mount || '';
   document.getElementById('editProxy').value = profile.proxy || '';
+  document.getElementById('editTimezone').value = (profile.machine && profile.machine.timezone) || '';
   document.getElementById('modalEdit').style.display = 'flex';
 }
 
@@ -272,8 +273,9 @@ document.getElementById('editForm').addEventListener('submit', async (e) => {
   if (!editingName) return;
   const hostMount = document.getElementById('editHostMount').value.trim();
   const proxy = document.getElementById('editProxy').value.trim();
+  const timezone = document.getElementById('editTimezone').value.trim();
   try {
-    await window.api.profiles.update(editingName, hostMount, proxy);
+    await window.api.profiles.update(editingName, hostMount, proxy, timezone);
     toast(`"${editingName}" updated.`, 'success');
     document.getElementById('modalEdit').style.display = 'none';
     editingName = null;

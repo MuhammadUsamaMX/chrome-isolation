@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import zoneinfo
 
 from config import CHROME_PROFILES_DIR
 from validator import validate_profile_name, safe_profile_path
@@ -118,9 +119,28 @@ def create_profile(name: str, custom_path: str = '', host_mount: str = '', proxy
     return entry
 
 
-def update_profile(name: str, host_mount: str = None, proxy: str = None) -> dict:
-    """Update a profile's read-only host mount and/or proxy. Empty string
-    clears the field (host mount falls back to the home directory)."""
+def _update_signature_timezone(path: str, timezone: str) -> None:
+    """Write the timezone into the profile's hardware-signature.json, creating
+    the file if the profile has not been launched yet (hardware-spoof.sh
+    backfills the remaining machine fields on first launch)."""
+    sig_path = os.path.join(path, 'hardware-signature.json')
+    sig = {}
+    if os.path.isfile(sig_path):
+        try:
+            with open(sig_path) as f:
+                sig = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            sig = {}
+    sig.setdefault('system', {})['timezone'] = timezone
+    with open(sig_path, 'w') as f:
+        json.dump(sig, f, indent=2)
+
+
+def update_profile(name: str, host_mount: str = None, proxy: str = None,
+                   timezone: str = None) -> dict:
+    """Update a profile's read-only host mount, proxy, and/or timezone.
+    Empty string clears a field (host mount falls back to the home directory,
+    timezone falls back to the machine signature default)."""
     name = validate_profile_name(name)
 
     if host_mount is not None:
@@ -132,6 +152,13 @@ def update_profile(name: str, host_mount: str = None, proxy: str = None) -> dict
 
     if proxy is not None:
         proxy = _validate_proxy(proxy)
+
+    if timezone is not None:
+        timezone = timezone.strip()
+        if timezone and timezone not in zoneinfo.available_timezones():
+            raise ValueError(f"Invalid timezone: {timezone}")
+        if timezone:
+            _update_signature_timezone(resolve_profile_path(name), timezone)
 
     return _update_registry(name, host_mount=host_mount, proxy=proxy)
 

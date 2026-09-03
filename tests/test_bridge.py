@@ -102,24 +102,21 @@ def test_create_with_host_mount_round_trip():
 
 
 def test_update_profile_round_trip():
-    """create with proxy -> update host_mount+proxy -> listed -> deleted."""
+    """create with proxy -> update host_mount+proxy+timezone -> listed -> deleted."""
     proc = None
     host_tmp = tempfile.mkdtemp(prefix='bridge-host-')
     name = f"bridge-upd-{os.getpid()}"
     try:
         proc = _spawn_bridge()
+        # Phase 1: create + update, then verify the signature file BEFORE the
+        # delete (which removes the profile directory).
         resps = _exchange(proc, [
             {"id": "6", "method": "create_profile",
              "params": {"name": name, "proxy": "socks5://127.0.0.1:1080"}},
             {"id": "7", "method": "update_profile",
-             "params": {"name": name, "host_mount": host_tmp, "proxy": "socks5://127.0.0.1:9050"}},
-            {"id": "8", "method": "list_profiles", "params": {}},
-            {"id": "9", "method": "delete_profile", "params": {"name": name}},
+             "params": {"name": name, "host_mount": host_tmp,
+                        "proxy": "socks5://127.0.0.1:9050", "timezone": "Asia/Karachi"}},
         ])
-        proc.stdin.close()
-        proc.wait(timeout=30)
-        err = proc.stderr.read()
-        assert proc.returncode == 0, f"bridge exited {proc.returncode}: {err}"
 
         # create -> proxy stored
         assert resps[0]['id'] == '6', resps[0]
@@ -132,20 +129,66 @@ def test_update_profile_round_trip():
         assert resps[1]['result']['host_mount'] == host_tmp, resps[1]
         assert resps[1]['result']['proxy'] == 'socks5://127.0.0.1:9050', resps[1]
 
+        # timezone written into the profile's hardware-signature.json
+        sig_path = os.path.join(resps[1]['result']['path'], 'hardware-signature.json')
+        assert os.path.isfile(sig_path), sig_path
+        with open(sig_path) as f:
+            sig = json.load(f)
+        assert sig['system']['timezone'] == 'Asia/Karachi', sig
+
+        # Phase 2: list + delete
+        resps = _exchange(proc, [
+            {"id": "8", "method": "list_profiles", "params": {}},
+            {"id": "9", "method": "delete_profile", "params": {"name": name}},
+        ])
+        proc.stdin.close()
+        proc.wait(timeout=30)
+        err = proc.stderr.read()
+        assert proc.returncode == 0, f"bridge exited {proc.returncode}: {err}"
+
         # list -> reflects the update
-        assert resps[2]['id'] == '8', resps[2]
-        found = [p for p in resps[2]['result'] if p['name'] == name]
-        assert len(found) == 1, resps[2]
+        assert resps[0]['id'] == '8', resps[0]
+        found = [p for p in resps[0]['result'] if p['name'] == name]
+        assert len(found) == 1, resps[0]
         assert found[0]['host_mount'] == host_tmp, found
         assert found[0]['proxy'] == 'socks5://127.0.0.1:9050', found
+        assert found[0]['machine'].get('timezone') == 'Asia/Karachi', found
 
         # delete -> gone
-        assert resps[3]['id'] == '9', resps[3]
-        assert resps[3]['result']['status'] == 'deleted', resps[3]
+        assert resps[1]['id'] == '9', resps[1]
+        assert resps[1]['result']['status'] == 'deleted', resps[1]
     finally:
         if proc and proc.poll() is None:
             proc.kill()
         shutil.rmtree(host_tmp, ignore_errors=True)
+
+
+def test_invalid_timezone_rejected():
+    proc = None
+    name = f"bridge-tz-{os.getpid()}"
+    try:
+        proc = _spawn_bridge()
+        resps = _exchange(proc, [
+            {"id": "11", "method": "create_profile", "params": {"name": name}},
+            {"id": "12", "method": "update_profile",
+             "params": {"name": name, "timezone": "Not/AZone"}},
+            {"id": "13", "method": "delete_profile", "params": {"name": name}},
+        ])
+        proc.stdin.close()
+        proc.wait(timeout=30)
+        err = proc.stderr.read()
+        assert proc.returncode == 0, f"bridge exited {proc.returncode}: {err}"
+
+        assert resps[0]['id'] == '11', resps[0]
+        assert 'error' not in resps[0], resps[0]
+        assert resps[1]['id'] == '12', resps[1]
+        assert 'error' in resps[1], resps[1]
+        assert 'Invalid timezone' in resps[1]['error'], resps[1]
+        assert resps[2]['id'] == '13', resps[2]
+        assert resps[2]['result']['status'] == 'deleted', resps[2]
+    finally:
+        if proc and proc.poll() is None:
+            proc.kill()
 
 
 def test_invalid_proxy_rejected():

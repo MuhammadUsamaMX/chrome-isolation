@@ -8,7 +8,7 @@ contextBridge.exposeInMainWorld('api', {
   profiles: {
     list:    ()              => ipcRenderer.invoke('profiles:list'),
     create:  (name, path, hostMount, proxy) => ipcRenderer.invoke('profiles:create', name, path, hostMount, proxy),
-    update:  (name, hostMount, proxy) => ipcRenderer.invoke('profiles:update', name, hostMount, proxy),
+    update:  (name, hostMount, proxy, timezone) => ipcRenderer.invoke('profiles:update', name, hostMount, proxy, timezone),
     pickFolder: ()           => ipcRenderer.invoke('profiles:pickFolder'),
     delete:  (name)         => ipcRenderer.invoke('profiles:delete', name),
     start:   (name)         => ipcRenderer.invoke('profiles:start',  name),

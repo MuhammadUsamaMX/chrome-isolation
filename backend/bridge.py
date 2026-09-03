@@ -23,7 +23,7 @@ import profile_service as svc
 _METHODS = {
     "list_profiles":   lambda p: svc.get_all_profiles(),
     "create_profile":  lambda p: svc.create_profile(p["name"], p.get("custom_path", ""), p.get("host_mount", ""), p.get("proxy", "")),
-    "update_profile":  lambda p: svc.update_profile(p["name"], p.get("host_mount"), p.get("proxy")),
+    "update_profile":  lambda p: svc.update_profile(p["name"], p.get("host_mount"), p.get("proxy"), p.get("timezone")),
     "delete_profile":  lambda p: svc.delete_profile(p["name"]),
     "start_profile":   lambda p: svc.start_profile(p["name"]),
     "stop_profile":    lambda p: svc.stop_profile(p["name"]),

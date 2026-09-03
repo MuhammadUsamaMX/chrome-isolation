@@ -276,6 +276,31 @@
                  autocomplete="off">
           <small>Routes this profile's traffic through a different IP.</small>
         </label>
+        <label>Timezone <span class="opt">(optional)</span>
+          <input type="text" id="editTimezone" list="tzList"
+                 placeholder="e.g. Asia/Karachi" autocomplete="off">
+          <datalist id="tzList">
+            <option value="Asia/Karachi"></option>
+            <option value="Asia/Dubai"></option>
+            <option value="Asia/Kolkata"></option>
+            <option value="Asia/Tokyo"></option>
+            <option value="Asia/Shanghai"></option>
+            <option value="Asia/Singapore"></option>
+            <option value="Europe/London"></option>
+            <option value="Europe/Berlin"></option>
+            <option value="Europe/Paris"></option>
+            <option value="America/New_York"></option>
+            <option value="America/Chicago"></option>
+            <option value="America/Denver"></option>
+            <option value="America/Los_Angeles"></option>
+            <option value="America/Sao_Paulo"></option>
+            <option value="Australia/Sydney"></option>
+            <option value="Africa/Cairo"></option>
+            <option value="Africa/Lagos"></option>
+            <option value="Pacific/Auckland"></option>
+          </datalist>
+          <small>IANA timezone for this profile's machine identity.</small>
+        </label>
         <div class="modal-actions">
           <button type="button" class="btn btn-secondary" id="btnEditCancel">Cancel</button>
           <button type="submit" class="btn btn-primary">Save</button>
