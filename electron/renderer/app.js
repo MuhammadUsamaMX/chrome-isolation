@@ -70,14 +70,23 @@ function renderProfiles(profiles) {
     const label  = STATUS_LABEL[status] || status;
     const isRunning = status === 'running';
 
+    // Machine identity chips from the profile's hardware signature
+    const m = p.machine || {};
+    const chips = [
+      m.cpu_cores ? `${m.cpu_cores} cores` : null,
+      m.language || null,
+      m.timezone ? m.timezone.split('/').pop().replace(/_/g, ' ') : null,
+      m.gpu_mode || null,
+    ].filter(Boolean);
+
     card.innerHTML = `
       <div class="card-header">
         <span class="card-name">${esc(p.name)}</span>
         <span class="badge badge-${esc(status)}">${esc(label)}</span>
       </div>
+      ${chips.length ? `<div class="card-chips">${chips.map(c => `<span class="chip">${esc(c)}</span>`).join('')}</div>` : ''}
       <div class="card-meta">
         <span>Storage: ${p.size_mb ?? 0} MB</span>
-        <span>Desktop: ${p.has_desktop_entry ? 'Yes' : 'No'}</span>
         <span>Host: ${p.host_mount ? esc(p.host_mount) : '~'}</span>
         <span>Proxy: ${p.proxy ? esc(p.proxy) : 'None'}</span>
         ${p.created_at ? `<span>Created: ${esc(p.created_at.replace('T',' ').replace('Z',''))}</span>` : ''}
@@ -86,8 +95,8 @@ function renderProfiles(profiles) {
         ${isRunning
           ? `<button class="btn btn-danger btn-sm"   data-action="stop">Stop</button>`
           : `<button class="btn btn-success btn-sm"  data-action="start">Launch</button>`}
-        <button class="btn btn-secondary btn-sm" data-action="export">Export</button>
         <button class="btn btn-secondary btn-sm" data-action="edit">Edit</button>
+        <button class="btn btn-secondary btn-sm" data-action="export">Export</button>
         <button class="btn btn-danger btn-sm"    data-action="delete">Delete</button>
       </div>
     `;
@@ -181,7 +190,7 @@ document.getElementById('createForm').addEventListener('submit', async (e) => {
 // ── Browse (native folder picker) ─────────────────────────────────────────────
 async function browseFolder(inputId) {
   try {
-    const r = await window.api.pickFolder();
+    const r = await window.api.profiles.pickFolder();
     if (r && !r.canceled) document.getElementById(inputId).value = r.path;
   } catch (e) {
     toast(`Folder picker failed: ${e.message}`, 'error');

@@ -37,6 +37,7 @@ RUN apk add --no-cache \
 COPY --chown=chrome:chrome scripts/docker/hardware-spoof.sh   /home/chrome/scripts/
 COPY --chown=chrome:chrome scripts/docker/user-agent-spoof.sh /home/chrome/scripts/
 COPY --chown=chrome:chrome scripts/docker/stealth-launch.sh   /home/chrome/scripts/
+COPY --chown=chrome:chrome scripts/docker/proxy-wrapper.py    /home/chrome/scripts/
 
 RUN chmod +x /home/chrome/scripts/*.sh
 

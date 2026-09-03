@@ -31,7 +31,7 @@ Chrome that opens via this manager reads your host's fonts, icons, GTK theme, an
 - **Wayland-native** — runs on Wayland via `--ozone-platform=wayland`, no X11 needed
 - **Stealth mode** — each profile presents as its own machine: stable per-profile CPU core count, browser language, GPU backend (real GPU or software), timezone, user-agent, hostname, and window size
 - **Host files read-only** — your home directory (or a per-profile custom folder) is mounted read-only into each container at `/home/chrome/host`
-- **Per-profile proxy** — route a profile's traffic through a SOCKS5/HTTP proxy for a different egress IP; loopback addresses are rewritten to the host automatically and WebRTC is forced through the proxy
+- **Per-profile proxy** — route a profile's traffic through a SOCKS5/HTTP proxy for a different egress IP; loopback addresses are rewritten to the host automatically, WebRTC is forced through the proxy, and authenticated proxies (`socks5://user:pass@host:port`) are handled by an in-container auth wrapper
 - **Dark / Light mode** — follows host GNOME colour scheme; toggle in titlebar
 - **Host preferences inherited** — fonts, icons, GTK theme, cursor theme all mounted read-only
 - **No localhost attack surface** — all IPC is over stdio JSON, no HTTP server
@@ -125,7 +125,7 @@ chrome-isolation
 ## Usage
 
 ### Create a profile
-Click **New Profile** in the sidebar. Give it a name (letters, numbers, dash, underscore). Optionally set a custom storage path, a **Host Folder** — a directory from your machine mounted read-only into the container at `/home/chrome/host` (leave empty to mount your home directory; use **Browse…** to pick it with the file manager) — and a **Proxy** such as `socks5://127.0.0.1:1080` to route the profile through a different IP.
+Click **New Profile** in the sidebar. Give it a name (letters, numbers, dash, underscore). Optionally set a custom storage path, a **Host Folder** — a directory from your machine mounted read-only into the container at `/home/chrome/host` (leave empty to mount your home directory; use **Browse…** to pick it with the file manager) — and a **Proxy** such as `socks5://127.0.0.1:1080` or `socks5://user:pass@proxy.example.com:1080` to route the profile through a different IP.
 
 ### Edit a profile
 Click **Edit** on any profile card to change the read-only host folder and proxy after creation. Changes apply the next time the profile is launched.
@@ -162,7 +162,7 @@ Click the moon/sun icon in the titlebar. Preference is saved across sessions.
 | **S5 — Container over-privilege** | No `--privileged`, no `SYS_ADMIN`; `/.dockerenv` masked; realistic `shm_size`, `ulimits`. The container entrypoint uses `--no-sandbox` because Docker's default seccomp profile blocks unprivileged user namespaces — the container is the security boundary |
 | **S6 — Flask dev server in production** | Eliminated — Electron replaces Flask entirely |
 | **S7 — Host files exposed to container** | Home directory (or per-profile folder) mounted **read-only** at `/home/chrome/host` — the container can read host files but never write to them |
-| **S8 — Per-profile proxy** | Optional SOCKS5/HTTP proxy per profile; loopback rewritten to `host.docker.internal` (host-gateway alias) and WebRTC forced through the proxy to prevent IP leaks |
+| **S8 — Per-profile proxy** | Optional SOCKS5/HTTP proxy per profile; loopback rewritten to `host.docker.internal` (host-gateway alias), WebRTC forced through the proxy to prevent IP leaks, and `user:pass@` credentials handled by an in-container auth wrapper (Chromium ignores credentials in proxy URLs) |
 
 ---
 

@@ -11,6 +11,7 @@ Docker manager — hardened container runtime (S5 fix).
 import grp
 import hashlib
 import os
+import re
 import subprocess
 import sys
 import time
@@ -129,17 +130,33 @@ class DockerManager:
         # different egress IP. Loopback addresses are rewritten to
         # host.docker.internal so the container reaches a proxy running on the
         # host; WebRTC is forced through the proxy to avoid IP leaks.
+        # Authenticated proxies (user:pass@) are handled by the in-container
+        # proxy-wrapper.py, since Chromium ignores credentials in proxy URLs.
         entry = get_profile(profile_name)
         proxy = (entry or {}).get('proxy', '')
         command = [f'--class=chrome-{profile_name}']
         extra_hosts = None
         if proxy:
-            proxy = proxy.replace('127.0.0.1', 'host.docker.internal') \
-                           .replace('localhost', 'host.docker.internal')
-            command += [
-                f'--proxy-server={proxy}',
-                '--webrtc-ip-handling-policy=disable_non_proxied_udp',
-            ]
+            parsed = self._parse_proxy(proxy)
+            if parsed and parsed['user']:
+                env['CHROME_PROXY_SCHEME'] = parsed['scheme']
+                env['CHROME_PROXY_USER'] = parsed['user']
+                env['CHROME_PROXY_PASS'] = parsed['pass']
+                env['CHROME_PROXY_HOST'] = parsed['host'].replace(
+                    '127.0.0.1', 'host.docker.internal').replace(
+                    'localhost', 'host.docker.internal')
+                env['CHROME_PROXY_PORT'] = str(parsed['port'])
+                command += [
+                    '--proxy-server=socks5://127.0.0.1:1081',
+                    '--webrtc-ip-handling-policy=disable_non_proxied_udp',
+                ]
+            else:
+                proxy = proxy.replace('127.0.0.1', 'host.docker.internal') \
+                               .replace('localhost', 'host.docker.internal')
+                command += [
+                    f'--proxy-server={proxy}',
+                    '--webrtc-ip-handling-policy=disable_non_proxied_udp',
+                ]
             extra_hosts = {'host.docker.internal': 'host-gateway'}
 
         run_kwargs = dict(
@@ -193,6 +210,26 @@ class DockerManager:
             return {"status": "not_found"}
 
     # ============================================================= internals
+    @staticmethod
+    def _parse_proxy(proxy: str) -> Optional[dict]:
+        """Split a proxy URL into scheme/user/pass/host/port. Returns None if
+        the format is not recognised (profile_service validates it first)."""
+        m = re.match(
+            r'^(socks5|socks5h|http|https)://(?:([^:@/]+):([^:@/]+)@)?'
+            r'([a-zA-Z0-9._-]+):(\d{1,5})$',
+            proxy,
+        )
+        if not m:
+            return None
+        scheme, user, pwd, host, port = m.groups()
+        return {
+            'scheme': scheme,
+            'user': user or '',
+            'pass': pwd or '',
+            'host': host,
+            'port': int(port),
+        }
+
     def _profile_host_mount(self, profile_name: str) -> str:
         """
         Per-profile host folder mounted read-only into the container.

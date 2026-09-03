@@ -235,6 +235,32 @@ def test_start_container_proxy():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_start_container_authenticated_proxy():
+    m, tmp = _make_manager()
+    try:
+        # Authenticated proxy -> local wrapper (127.0.0.1:1081) + env creds
+        registry.register_profile(
+            'authproxy', os.path.join(registry.CHROME_PROFILES_DIR, 'authproxy'),
+            proxy='socks5://user:pass@127.0.0.1:1080')
+        result = m.start_container('authproxy')
+        assert result['status'] == 'started', result
+        kwargs = m.client.containers.run_kwargs
+
+        cmd = kwargs['command']
+        assert '--proxy-server=socks5://127.0.0.1:1081' in cmd, cmd
+        assert '--webrtc-ip-handling-policy=disable_non_proxied_udp' in cmd, cmd
+        assert kwargs.get('extra_hosts') == {'host.docker.internal': 'host-gateway'}, kwargs
+
+        env = kwargs['environment']
+        assert env['CHROME_PROXY_SCHEME'] == 'socks5', env
+        assert env['CHROME_PROXY_USER'] == 'user', env
+        assert env['CHROME_PROXY_PASS'] == 'pass', env
+        assert env['CHROME_PROXY_HOST'] == 'host.docker.internal', env
+        assert env['CHROME_PROXY_PORT'] == '1080', env
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_profile_size_cache():
     m, tmp = _make_manager()
     try:

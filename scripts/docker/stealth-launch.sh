@@ -35,6 +35,20 @@ if [[ "${HOST_COLOR_SCHEME:-dark}" == "dark" ]]; then
     FEATURES="$FEATURES,WebContentsForceDark"
 fi
 
+# Authenticated proxy — Chromium ignores credentials in --proxy-server URLs,
+# so start the local auth wrapper (listens on 127.0.0.1:1081) and point
+# Chromium at it via the docker run command.
+if [[ -n "${CHROME_PROXY_USER:-}" && -n "${CHROME_PROXY_HOST:-}" ]]; then
+    python3 /home/chrome/scripts/proxy-wrapper.py &
+    WRAPPER_PID=$!
+    for _ in $(seq 1 30); do
+        if python3 -c "import socket; socket.create_connection(('127.0.0.1', 1081), 0.2).close()" 2>/dev/null; then
+            break
+        fi
+        sleep 0.1
+    done
+fi
+
 # Clamp the spoofed core count to what the host actually exposes, then pin the
 # process to that many CPUs. Chromium reads sched_getaffinity, so
 # navigator.hardwareConcurrency reports the spoofed count.

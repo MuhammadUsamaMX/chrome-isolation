@@ -2,6 +2,7 @@
 Profile service — high-level operations used by the IPC bridge.
 All inputs go through validator.py before any filesystem or Docker call.
 """
+import json
 import os
 import re
 import shutil
@@ -36,6 +37,24 @@ def _validate_proxy(proxy: str) -> str:
     return proxy
 
 
+def _read_machine(path: str) -> dict:
+    """Read the profile's machine signature (hardware-signature.json) so the
+    UI can show its identity. Returns {} when absent or unreadable."""
+    sig_path = os.path.join(path, 'hardware-signature.json')
+    if not os.path.isfile(sig_path):
+        return {}
+    try:
+        with open(sig_path) as f:
+            sig = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {}
+    machine = {}
+    machine.update(sig.get('hardware', {}))
+    machine.update(sig.get('system', {}))
+    machine.update(sig.get('browser', {}))
+    return machine
+
+
 def get_all_profiles() -> list:
     """
     Merge registry entries with live Docker status and on-disk size.
@@ -62,6 +81,7 @@ def get_all_profiles() -> list:
             'path': p['path'],
             'host_mount': p.get('host_mount', ''),
             'proxy': p.get('proxy', ''),
+            'machine': _read_machine(p['path']),
             'created_at': p.get('created_at', ''),
             'status': _docker.container_status(p['name']),
             'size_mb': _docker.profile_size_mb(p['name']),
