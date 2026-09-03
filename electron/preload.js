@@ -18,6 +18,13 @@ contextBridge.exposeInMainWorld('api', {
     import:  ()             => ipcRenderer.invoke('profiles:import'),
   },
 
+  // Global proxy store
+  proxies: {
+    list:   ()              => ipcRenderer.invoke('proxies:list'),
+    add:    (name, url)     => ipcRenderer.invoke('proxies:add', name, url),
+    delete: (name)          => ipcRenderer.invoke('proxies:delete', name),
+  },
+
   // Custom window controls (frameless window)
   win: {
     minimize:        ()   => ipcRenderer.send('window:minimize'),

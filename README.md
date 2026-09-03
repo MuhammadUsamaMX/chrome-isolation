@@ -31,7 +31,7 @@ Chrome that opens via this manager reads your host's fonts, icons, GTK theme, an
 - **Wayland-native** — runs on Wayland via `--ozone-platform=wayland`, no X11 needed
 - **Stealth mode** — each profile presents as its own machine: stable per-profile CPU core count, browser language, GPU backend (real GPU or software), timezone, user-agent, hostname, and window size
 - **Host files read-only** — your home directory (or a per-profile custom folder) is mounted read-only into each container at `/home/chrome/host`
-- **Per-profile proxy** — route a profile's traffic through a SOCKS5/HTTP proxy for a different egress IP; loopback addresses are rewritten to the host automatically, WebRTC is forced through the proxy, and authenticated proxies (`socks5://user:pass@host:port`) are handled by an in-container auth wrapper
+- **Per-profile proxy** — route a profile's traffic through a SOCKS5/HTTP proxy for a different egress IP; manage a shared proxy list in the app (sidebar → **Proxies**), pick one per profile from a dropdown, or enter a custom URL; loopback addresses are rewritten to the host automatically, WebRTC is forced through the proxy, and authenticated proxies (`socks5://user:pass@host:port`) are handled by an in-container auth wrapper
 - **Dark / Light mode** — follows host GNOME colour scheme; toggle in titlebar
 - **Host preferences inherited** — fonts, icons, GTK theme, cursor theme all mounted read-only
 - **No localhost attack surface** — all IPC is over stdio JSON, no HTTP server
@@ -125,7 +125,10 @@ chrome-isolation
 ## Usage
 
 ### Create a profile
-Click **New Profile** in the sidebar. Give it a name (letters, numbers, dash, underscore). Optionally set a custom storage path, a **Host Folder** — a directory from your machine mounted read-only into the container at `/home/chrome/host` (leave empty to mount your home directory; use **Browse…** to pick it with the file manager) — and a **Proxy** such as `socks5://127.0.0.1:1080` or `socks5://user:pass@proxy.example.com:1080` to route the profile through a different IP.
+Click **New Profile** in the sidebar. Give it a name (letters, numbers, dash, underscore). Optionally set a custom storage path, a **Host Folder** — a directory from your machine mounted read-only into the container at `/home/chrome/host` (leave empty to mount your home directory; use **Browse…** to pick it with the file manager) — and a **Proxy** chosen from the saved list or entered as a custom URL such as `socks5://127.0.0.1:1080` or `socks5://user:pass@proxy.example.com:1080`.
+
+### Manage proxies
+Click **Proxies** in the sidebar to add, view, and delete named proxies shared by all profiles (e.g. `tunnel-alan1` → `socks5://127.0.0.1:10080`). Profiles reference them by name, so updating a proxy in the list updates every profile using it.
 
 ### Edit a profile
 Click **Edit** on any profile card to change the read-only host folder, proxy, and machine timezone after creation. Changes apply the next time the profile is launched.

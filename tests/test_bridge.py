@@ -191,6 +191,38 @@ def test_invalid_timezone_rejected():
             proc.kill()
 
 
+def test_proxy_store_round_trip():
+    """add_proxy -> list_proxies -> delete_proxy (real store, cleaned up)."""
+    proc = None
+    name = f"bridge-proxy-{os.getpid()}"
+    try:
+        proc = _spawn_bridge()
+        resps = _exchange(proc, [
+            {"id": "20", "method": "add_proxy",
+             "params": {"name": name, "url": "socks5://127.0.0.1:19999"}},
+            {"id": "21", "method": "list_proxies", "params": {}},
+            {"id": "22", "method": "delete_proxy", "params": {"name": name}},
+        ])
+        proc.stdin.close()
+        proc.wait(timeout=30)
+        err = proc.stderr.read()
+        assert proc.returncode == 0, f"bridge exited {proc.returncode}: {err}"
+
+        assert resps[0]['id'] == '20', resps[0]
+        assert 'error' not in resps[0], resps[0]
+        assert resps[0]['result']['url'] == 'socks5://127.0.0.1:19999', resps[0]
+
+        assert resps[1]['id'] == '21', resps[1]
+        found = [p for p in resps[1]['result'] if p['name'] == name]
+        assert len(found) == 1, resps[1]
+
+        assert resps[2]['id'] == '22', resps[2]
+        assert resps[2]['result']['status'] == 'deleted', resps[2]
+    finally:
+        if proc and proc.poll() is None:
+            proc.kill()
+
+
 def test_invalid_proxy_rejected():
     proc = None
     name = f"bridge-bad-{os.getpid()}"

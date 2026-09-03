@@ -119,6 +119,15 @@
           </svg>
           Import
         </button>
+        <button class="btn btn-secondary" id="btnProxies">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2">
+            <ellipse cx="12" cy="5" rx="8" ry="3"/>
+            <path d="M4 5v14c0 1.66 3.58 3 8 3s8-1.34 8-3V5"/>
+            <path d="M4 12c0 1.66 3.58 3 8 3s8-1.34 8-3"/>
+          </svg>
+          Proxies
+        </button>
         <div class="sidebar-status">
           <span class="status-dot" id="statusDot"></span>
           <span id="statusText">Connecting…</span>
@@ -245,9 +254,13 @@
           <small>Mounted read-only at /home/chrome/host inside the container.</small>
         </label>
         <label>Proxy <span class="opt">(optional)</span>
-          <input type="text" id="inputProxy" placeholder="e.g. socks5://127.0.0.1:1080"
-                 autocomplete="off">
-          <small>Routes this profile's traffic through a different IP. Loopback is rewritten to the host automatically.</small>
+          <select id="inputProxySelect" class="modal-select">
+            <option value="">None</option>
+            <option value="__custom__">Custom…</option>
+          </select>
+          <input type="text" id="inputProxyCustom" placeholder="socks5://user:pass@host:port"
+                 style="display:none" autocomplete="off">
+          <small>Pick a saved proxy or choose Custom to enter one.</small>
         </label>
         <div class="modal-actions">
           <button type="button" class="btn btn-secondary" id="btnCreateCancel">Cancel</button>
@@ -272,9 +285,13 @@
           <small>Mounted read-only at /home/chrome/host inside the container.</small>
         </label>
         <label>Proxy <span class="opt">(optional)</span>
-          <input type="text" id="editProxy" placeholder="e.g. socks5://127.0.0.1:1080"
-                 autocomplete="off">
-          <small>Routes this profile's traffic through a different IP.</small>
+          <select id="editProxySelect" class="modal-select">
+            <option value="">None</option>
+            <option value="__custom__">Custom…</option>
+          </select>
+          <input type="text" id="editProxyCustom" placeholder="socks5://user:pass@host:port"
+                 style="display:none" autocomplete="off">
+          <small>Pick a saved proxy or choose Custom to enter one.</small>
         </label>
         <label>Timezone <span class="opt">(optional)</span>
           <input type="text" id="editTimezone" list="tzList"
@@ -306,6 +323,25 @@
           <button type="submit" class="btn btn-primary">Save</button>
         </div>
       </form>
+    </div>
+  </div>
+
+  <!-- Manage Proxies modal -->
+  <div class="modal-overlay" id="modalProxies" style="display:none;">
+    <div class="modal modal-wide">
+      <h2>Proxies</h2>
+      <p class="modal-sub">Shared proxies available to every profile.</p>
+      <div id="proxyList" class="proxy-list"></div>
+      <form id="proxyForm" class="proxy-form">
+        <input type="text" id="proxyName" placeholder="Name (e.g. tunnel-alan1)"
+               autocomplete="off">
+        <input type="text" id="proxyUrl" placeholder="socks5://127.0.0.1:10080"
+               autocomplete="off">
+        <button type="submit" class="btn btn-primary btn-sm">Add</button>
+      </form>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secondary" id="btnProxiesClose">Close</button>
+      </div>
     </div>
   </div>
 

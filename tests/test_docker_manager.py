@@ -261,6 +261,30 @@ def test_start_container_authenticated_proxy():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_start_container_saved_proxy_name():
+    m, tmp = _make_manager()
+    try:
+        # Point the proxy store at a temp file with one saved proxy
+        import proxy_store
+        store_tmp = tempfile.mkdtemp(prefix='proxy-store-')
+        proxy_store.PROXIES_FILE = os.path.join(store_tmp, 'proxies.json')
+        proxy_store.add_proxy('tunnel-a', 'socks5://127.0.0.1:10080')
+
+        # Profile references the proxy by NAME — must resolve to its URL
+        registry.register_profile(
+            'named', os.path.join(registry.CHROME_PROFILES_DIR, 'named'),
+            proxy='tunnel-a')
+        result = m.start_container('named')
+        assert result['status'] == 'started', result
+        kwargs = m.client.containers.run_kwargs
+        cmd = kwargs['command']
+        assert '--proxy-server=socks5://host.docker.internal:10080' in cmd, cmd
+        assert kwargs.get('extra_hosts') == {'host.docker.internal': 'host-gateway'}, kwargs
+        shutil.rmtree(store_tmp, ignore_errors=True)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_profile_size_cache():
     m, tmp = _make_manager()
     try:

@@ -212,6 +212,7 @@ async function handleAction(action, profile) {
 
 // ── Create modal ──────────────────────────────────────────────────────────────
 document.getElementById('btnCreate').addEventListener('click', () => {
+  populateProxySelect('inputProxySelect', '');
   document.getElementById('modalCreate').style.display = 'flex';
   document.getElementById('inputName').focus();
 });
@@ -221,12 +222,29 @@ document.getElementById('btnCreateCancel').addEventListener('click', () => {
   document.getElementById('createForm').reset();
 });
 
+// Proxy select -> reveal the custom URL input
+function wireProxySelect(selectId, customId) {
+  document.getElementById(selectId).addEventListener('change', () => {
+    const custom = document.getElementById(customId);
+    custom.style.display = document.getElementById(selectId).value === '__custom__' ? '' : 'none';
+  });
+}
+wireProxySelect('inputProxySelect', 'inputProxyCustom');
+wireProxySelect('editProxySelect', 'editProxyCustom');
+
+// Read the effective proxy value from a select + custom input pair
+function readProxyValue(selectId, customId) {
+  const sel = document.getElementById(selectId).value;
+  if (sel === '__custom__') return document.getElementById(customId).value.trim();
+  return sel; // '' (none) or a saved proxy name
+}
+
 document.getElementById('createForm').addEventListener('submit', async (e) => {
   e.preventDefault();
   const name = document.getElementById('inputName').value.trim();
   const path = document.getElementById('inputPath').value.trim();
   const hostMount = document.getElementById('inputHostMount').value.trim();
-  const proxy = document.getElementById('inputProxy').value.trim();
+  const proxy = readProxyValue('inputProxySelect', 'inputProxyCustom');
   if (!name) return;
   try {
     await window.api.profiles.create(name, path, hostMount, proxy);
@@ -258,8 +276,24 @@ function openEdit(profile) {
   editingName = profile.name;
   document.getElementById('editTitle').textContent = `Edit ${profile.name}`;
   document.getElementById('editHostMount').value = profile.host_mount || '';
-  document.getElementById('editProxy').value = profile.proxy || '';
   document.getElementById('editTimezone').value = (profile.machine && profile.machine.timezone) || '';
+
+  // Proxy: saved name -> select it; custom URL -> Custom… + fill the input
+  const proxy = profile.proxy || '';
+  const isSaved = savedProxies.some(p => p.name === proxy);
+  populateProxySelect('editProxySelect', isSaved ? proxy : '');
+  const customInput = document.getElementById('editProxyCustom');
+  if (isSaved) {
+    customInput.value = '';
+    customInput.style.display = 'none';
+  } else if (proxy) {
+    document.getElementById('editProxySelect').value = '__custom__';
+    customInput.value = proxy;
+    customInput.style.display = '';
+  } else {
+    customInput.value = '';
+    customInput.style.display = 'none';
+  }
   document.getElementById('modalEdit').style.display = 'flex';
 }
 
@@ -272,7 +306,7 @@ document.getElementById('editForm').addEventListener('submit', async (e) => {
   e.preventDefault();
   if (!editingName) return;
   const hostMount = document.getElementById('editHostMount').value.trim();
-  const proxy = document.getElementById('editProxy').value.trim();
+  const proxy = readProxyValue('editProxySelect', 'editProxyCustom');
   const timezone = document.getElementById('editTimezone').value.trim();
   try {
     await window.api.profiles.update(editingName, hostMount, proxy, timezone);
@@ -282,6 +316,80 @@ document.getElementById('editForm').addEventListener('submit', async (e) => {
     await loadProfiles();
   } catch (err) {
     toast(`Update failed: ${err.message}`, 'error');
+  }
+});
+
+// ── Global proxy store ────────────────────────────────────────────────────────
+let savedProxies = [];
+
+async function loadProxies() {
+  try {
+    const list = await window.api.proxies.list();
+    savedProxies = Array.isArray(list) ? list : [];
+  } catch (e) {
+    savedProxies = [];
+  }
+}
+
+function populateProxySelect(selectId, selected) {
+  const sel = document.getElementById(selectId);
+  sel.innerHTML = '<option value="">None</option>' +
+    savedProxies.map(p => `<option value="${esc(p.name)}">${esc(p.name)}</option>`).join('') +
+    '<option value="__custom__">Custom…</option>';
+  sel.value = selected;
+}
+
+function renderProxyList() {
+  const list = document.getElementById('proxyList');
+  if (!savedProxies.length) {
+    list.innerHTML = '<p class="proxy-empty">No proxies yet. Add one below.</p>';
+    return;
+  }
+  list.innerHTML = savedProxies.map(p => `
+    <div class="proxy-row">
+      <div class="proxy-info">
+        <span class="proxy-name">${esc(p.name)}</span>
+        <span class="proxy-url">${esc(p.url)}</span>
+      </div>
+      <button class="btn btn-danger btn-sm" data-del="${esc(p.name)}">Delete</button>
+    </div>
+  `).join('');
+  list.querySelectorAll('[data-del]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      try {
+        await window.api.proxies.delete(btn.dataset.del);
+        toast(`Proxy "${btn.dataset.del}" deleted.`, 'info');
+        await loadProxies();
+        renderProxyList();
+      } catch (e) {
+        toast(`Delete failed: ${e.message}`, 'error');
+      }
+    });
+  });
+}
+
+document.getElementById('btnProxies').addEventListener('click', async () => {
+  await loadProxies();
+  renderProxyList();
+  document.getElementById('modalProxies').style.display = 'flex';
+});
+
+document.getElementById('btnProxiesClose').addEventListener('click', () => {
+  document.getElementById('modalProxies').style.display = 'none';
+});
+
+document.getElementById('proxyForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const name = document.getElementById('proxyName').value.trim();
+  const url = document.getElementById('proxyUrl').value.trim();
+  try {
+    await window.api.proxies.add(name, url);
+    toast(`Proxy "${name}" added.`, 'success');
+    document.getElementById('proxyForm').reset();
+    await loadProxies();
+    renderProxyList();
+  } catch (err) {
+    toast(`Add failed: ${err.message}`, 'error');
   }
 });
 
@@ -351,3 +459,4 @@ window.api.win.onMaximizeChange(isMax => {
 
 // ── Initial load ──────────────────────────────────────────────────────────────
 loadProfiles();
+loadProxies();

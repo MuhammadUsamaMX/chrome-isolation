@@ -4,7 +4,6 @@ All inputs go through validator.py before any filesystem or Docker call.
 """
 import json
 import os
-import re
 import shutil
 import zoneinfo
 
@@ -19,22 +18,16 @@ from desktop_manager import (
     create_desktop_entry, remove_desktop_entry, desktop_entry_exists,
 )
 from archive import import_profile as _import_archive, export_profile as _export_archive
+from proxy_store import validate_url as _validate_proxy_url, _load as _load_proxies
 
 _docker = DockerManager()
 
-# socks5://host:port, socks5h://host:port, http://host:port, https://host:port
-# with optional user:pass@ credentials.
-_PROXY_RE = re.compile(
-    r'^(socks5|socks5h|http|https)://([^:@/]+(:[^:@/]+)?@)?[a-zA-Z0-9._-]+:\d{1,5}$'
-)
-
 
 def _validate_proxy(proxy: str) -> str:
+    """Accept a saved proxy name or a custom proxy URL."""
     proxy = proxy.strip()
-    if proxy and not _PROXY_RE.match(proxy):
-        raise ValueError(
-            "Invalid proxy. Use e.g. socks5://127.0.0.1:1080 or http://user:pass@host:8080"
-        )
+    if proxy and proxy not in _load_proxies():
+        _validate_proxy_url(proxy)
     return proxy
 
 

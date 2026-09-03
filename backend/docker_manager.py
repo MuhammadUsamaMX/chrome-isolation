@@ -24,6 +24,7 @@ from docker.types import Ulimit
 from config import DOCKER_IMAGE_NAME, CONTAINER_PREFIX, APP_DATA_DIR
 from validator import validate_profile_name
 from registry import resolve_profile_path, register_profile, get_profile
+from proxy_store import resolve as _resolve_proxy
 
 # Stable hostname pools — deterministic per profile via MD5
 _H_FIRST  = ['john','alex','sam','mike','lisa','chris','pat','lee','tom','jay','kai','max']
@@ -134,6 +135,9 @@ class DockerManager:
         # proxy-wrapper.py, since Chromium ignores credentials in proxy URLs.
         entry = get_profile(profile_name)
         proxy = (entry or {}).get('proxy', '')
+        if proxy:
+            # Saved proxy names resolve to their URL from the global store
+            proxy = _resolve_proxy(proxy)
         command = [f'--class=chrome-{profile_name}']
         extra_hosts = None
         if proxy:

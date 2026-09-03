@@ -277,6 +277,15 @@ function registerIpc() {
     return { canceled: false, path: filePaths[0] };
   });
 
+  // ── Global proxy store ──────────────────────────────────────────────────────
+  ipcMain.handle('proxies:list', () => callBackend('list_proxies'));
+  ipcMain.handle('proxies:add', (_, name, url) =>
+    callBackend('add_proxy', { name, url })
+  );
+  ipcMain.handle('proxies:delete', (_, name) =>
+    callBackend('delete_proxy', { name })
+  );
+
   ipcMain.handle('profiles:delete', (_, name) =>
     callBackend('delete_profile', { name })
   );

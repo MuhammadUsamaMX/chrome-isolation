@@ -18,6 +18,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import profile_service as svc
+import proxy_store
 
 
 _METHODS = {
@@ -30,6 +31,9 @@ _METHODS = {
     "profile_status":  lambda p: svc.profile_status(p["name"]),
     "import_profile":  lambda p: svc.import_profile(p["archive_path"]),
     "export_profile":  lambda p: svc.export_profile(p["name"], p["dest_path"]),
+    "list_proxies":    lambda p: proxy_store.list_proxies(),
+    "add_proxy":       lambda p: proxy_store.add_proxy(p["name"], p["url"]),
+    "delete_proxy":    lambda p: proxy_store.delete_proxy(p["name"]),
 }
 
 
