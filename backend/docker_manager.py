@@ -5,13 +5,15 @@ Docker manager — hardened container runtime (S5 fix).
 - PulseAudio / PipeWire socket mounted
 - GPU access via /dev/dri (read-only for display, rw for render)
 - Host desktop preferences injected as read-only volumes + env vars
-- --no-sandbox removed (uses user namespace seccomp profile instead)
+- --no-sandbox used inside the container (Docker's default seccomp profile blocks unprivileged user namespaces; the container itself is the security boundary)
 - profile registry used for all path lookups
 """
 import grp
 import hashlib
 import os
 import subprocess
+import sys
+import time
 from typing import Optional
 
 import docker
@@ -20,7 +22,7 @@ from docker.types import Ulimit
 
 from config import DOCKER_IMAGE_NAME, CONTAINER_PREFIX, APP_DATA_DIR
 from validator import validate_profile_name
-from registry import resolve_profile_path, register_profile
+from registry import resolve_profile_path, register_profile, get_profile
 
 # Stable hostname pools — deterministic per profile via MD5
 _H_FIRST  = ['john','alex','sam','mike','lisa','chris','pat','lee','tom','jay','kai','max']
@@ -28,8 +30,11 @@ _H_DEVICE = ['laptop','desktop','pc','thinkpad','studio','home','book','box']
 
 
 class DockerManager:
+    _SIZE_CACHE_TTL = 30  # seconds
+
     def __init__(self):
         self.client = docker.from_env()
+        self._size_cache = {}  # {profile_name: (timestamp, size_mb)}
         self._ensure_image()
 
     # ------------------------------------------------------------------ image
@@ -41,6 +46,10 @@ class DockerManager:
 
     def _build_image(self):
         dockerfile_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        # Inside a PyInstaller onefile bundle __file__ points into the _MEIPASS
+        # temp dir; the Dockerfile lives next to the packaged bridge binary.
+        if not os.path.isfile(os.path.join(dockerfile_dir, 'Dockerfile')):
+            dockerfile_dir = os.path.dirname(sys.executable)
         env = os.environ.copy()
         env['DOCKER_BUILDKIT'] = '1'
         result = subprocess.run(
@@ -71,8 +80,15 @@ class DockerManager:
 
     # ---------------------------------------------------------------- profile size
     def profile_size_mb(self, profile_name: str) -> float:
-        path = resolve_profile_path(validate_profile_name(profile_name))
+        profile_name = validate_profile_name(profile_name)
+        now = time.time()
+        cached = self._size_cache.get(profile_name)
+        if cached and now - cached[0] < self._SIZE_CACHE_TTL:
+            return cached[1]
+
+        path = resolve_profile_path(profile_name)
         if not os.path.isdir(path):
+            self._size_cache[profile_name] = (now, 0.0)
             return 0.0
         total = 0
         for dp, _, fnames in os.walk(path):
@@ -80,7 +96,9 @@ class DockerManager:
                 fp = os.path.join(dp, fn)
                 if os.path.exists(fp):
                     total += os.path.getsize(fp)
-        return round(total / (1024 * 1024), 2)
+        size_mb = round(total / (1024 * 1024), 2)
+        self._size_cache[profile_name] = (now, size_mb)
+        return size_mb
 
     # --------------------------------------------------------------- start
     def start_container(self, profile_name: str) -> dict:
@@ -88,6 +106,7 @@ class DockerManager:
         cname = self.container_name(profile_name)
         profile_dir = resolve_profile_path(profile_name)
         downloads_dir = os.path.join(profile_dir, "Downloads")
+        host_mount = self._profile_host_mount(profile_name)
 
         os.makedirs(profile_dir, exist_ok=True)
         os.makedirs(downloads_dir, exist_ok=True)
@@ -101,14 +120,13 @@ class DockerManager:
         except docker.errors.NotFound:
             pass
 
-        volumes = self._build_volumes(profile_dir, downloads_dir)
+        volumes = self._build_volumes(profile_dir, downloads_dir, host_mount)
         env = self._build_env(profile_name)
-        dns = self._host_dns()
         device_gids = self._device_group_ids()
         hostname = self._profile_hostname(profile_name)
 
-        container = self.client.containers.run(
-            DOCKER_IMAGE_NAME,
+        run_kwargs = dict(
+            image=DOCKER_IMAGE_NAME,
             name=cname,
             # Realistic host identity — hides Docker-generated hex hostname
             hostname=hostname,
@@ -119,18 +137,24 @@ class DockerManager:
             detach=True,
             volumes=volumes,
             environment=env,
-            devices=['/dev/dri'],
-            group_add=['audio'] + device_gids,
-            dns=dns,
-            dns_opt=['ndots:0'],
-            # No privileged, no SYS_ADMIN, no ipc=host
+            group_add=device_gids,
+            # No privileged, no SYS_ADMIN, no ipc=host.
+            # GPU backend flags are chosen per-profile in stealth-launch.sh.
             command=[
                 f'--class=chrome-{profile_name}',
-                '--enable-features=VulkanFromANGLE,DefaultANGLEVulkan',
-                '--use-gl=angle',
-                '--use-angle=vulkan',
             ]
         )
+        # GPU access only when the host actually exposes /dev/dri
+        if os.path.exists('/dev/dri'):
+            run_kwargs['devices'] = ['/dev/dri']
+        # 'audio' group only if it exists on the host
+        try:
+            grp.getgrnam('audio')
+            run_kwargs['group_add'] = ['audio'] + device_gids
+        except KeyError:
+            pass
+
+        container = self.client.containers.run(**run_kwargs)
         return {"status": "started", "container_id": container.id}
 
     # ----------------------------------------------------------------- stop
@@ -152,7 +176,18 @@ class DockerManager:
             return {"status": "not_found"}
 
     # ============================================================= internals
-    def _build_volumes(self, profile_dir: str, downloads_dir: str) -> dict:
+    def _profile_host_mount(self, profile_name: str) -> str:
+        """
+        Per-profile host folder mounted read-only into the container.
+        Falls back to the user's home directory when the profile has no
+        custom host_mount configured.
+        """
+        entry = get_profile(profile_name)
+        if entry and entry.get('host_mount'):
+            return os.path.realpath(os.path.expanduser(entry['host_mount']))
+        return os.path.expanduser('~')
+
+    def _build_volumes(self, profile_dir: str, downloads_dir: str, host_mount: str = '') -> dict:
         uid = os.getuid()
         xdg_runtime = f'/run/user/{uid}'
         wayland_display = os.environ.get('WAYLAND_DISPLAY', 'wayland-0')
@@ -164,16 +199,23 @@ class DockerManager:
             downloads_dir: {'bind': '/home/chrome/Downloads',        'mode': 'rw'},
         }
 
-        # Wayland socket + PipeWire/PulseAudio — mount the whole XDG_RUNTIME_DIR rw.
-        # This gives Chromium access to the Wayland compositor socket, PipeWire,
-        # and PulseAudio without needing X11 at all.
-        if os.path.exists(wayland_sock):
-            volumes[xdg_runtime] = {'bind': xdg_runtime, 'mode': 'rw'}
-        else:
-            # Fallback: at least mount audio socket if present
-            pulse_run = os.path.join(xdg_runtime, 'pulse')
-            if os.path.exists(pulse_run):
-                volumes[pulse_run] = {'bind': pulse_run, 'mode': 'rw'}
+        # Host folder (read-only) — the user's home by default, or a
+        # per-profile custom directory. Mounted at /home/chrome/host so the
+        # browser can read host files but never write to them.
+        host_src = host_mount or os.path.expanduser('~')
+        if os.path.isdir(host_src):
+            volumes[host_src] = {'bind': '/home/chrome/host', 'mode': 'ro'}
+
+        # Wayland / PipeWire / PulseAudio — mount only the individual sockets
+        # into the container's /home/chrome/.runtime (never the whole
+        # XDG_RUNTIME_DIR, which would expose unrelated host sockets).
+        for sock, bind_name in (
+            (wayland_sock, wayland_display),
+            (os.path.join(xdg_runtime, 'pipewire-0'), 'pipewire-0'),
+            (os.path.join(xdg_runtime, 'pulse'), 'pulse'),
+        ):
+            if os.path.exists(sock):
+                volumes[sock] = {'bind': f'/home/chrome/.runtime/{bind_name}', 'mode': 'rw'}
 
         # PulseAudio cookie (lives outside XDG_RUNTIME_DIR)
         for cookie in (
@@ -202,10 +244,6 @@ class DockerManager:
             if os.path.exists(src):
                 volumes[src] = {'bind': src, 'mode': 'ro'}
 
-        # Timezone
-        if os.path.exists('/etc/localtime'):
-            volumes['/etc/localtime'] = {'bind': '/etc/localtime', 'mode': 'ro'}
-
         # Mask /.dockerenv — Docker creates this zero-byte file at runtime;
         # fingerprinting scripts check its existence to detect containers.
         dockerenv_mask = os.path.join(APP_DATA_DIR, '.empty')
@@ -216,18 +254,17 @@ class DockerManager:
         return volumes
 
     def _build_env(self, profile_name: str) -> dict:
-        uid = os.getuid()
-        xdg_runtime = f'/run/user/{uid}'
         wayland_display = os.environ.get('WAYLAND_DISPLAY', 'wayland-0')
         env = {
             # Wayland — no DISPLAY/X11
             'WAYLAND_DISPLAY':  wayland_display,
-            'XDG_RUNTIME_DIR':  xdg_runtime,
+            # Container-side runtime dir holding the mounted sockets
+            'XDG_RUNTIME_DIR':  '/home/chrome/.runtime',
             'XDG_SESSION_TYPE': 'wayland',
             'GDK_BACKEND':      'wayland',
             'QT_QPA_PLATFORM':  'wayland',
             # Audio
-            'PULSE_SERVER': f'unix:{xdg_runtime}/pulse/native',
+            'PULSE_SERVER': 'unix:/home/chrome/.runtime/pulse/native',
             # Profile
             'CHROME_PROFILE': profile_name,
             # Locale
@@ -286,10 +323,6 @@ class DockerManager:
                 except Exception:
                     pass
         return 'dark'  # sensible default
-        return env
-
-    def _host_dns(self) -> list:
-        return ['172.17.0.1', '8.8.8.8', '8.8.4.4']
 
     def _device_group_ids(self) -> list:
         gids = []

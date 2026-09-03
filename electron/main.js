@@ -1,5 +1,5 @@
-const { app, BrowserWindow, ipcMain, dialog, Menu, Tray, nativeImage } = require('electron');
-const { spawn, execFileSync, spawnSync } = require('child_process');
+const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { spawn, spawnSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const readline = require('readline');
@@ -178,6 +178,7 @@ async function checkRequirements() {
 
 let bridge = null;
 const pendingRequests = new Map(); // id → { resolve, reject }
+let pendingQueue = []; // payload strings queued while the bridge is not yet up
 let reqCounter = 0;
 
 function startBridge() {
@@ -202,10 +203,30 @@ function startBridge() {
     if (!app.isPackaged) process.stderr.write(d);
   });
 
+  // Spawn failure (e.g. bridge binary missing): fail all in-flight requests
+  // so they never hang, and drop the queued payloads.
+  bridge.on('error', (err) => {
+    console.error('Bridge failed to start:', err);
+    for (const { reject } of pendingRequests.values()) reject(err);
+    pendingRequests.clear();
+    pendingQueue = [];
+    bridge = null;
+  });
+
   bridge.on('exit', (code) => {
     console.error(`Bridge exited (code=${code}). Restarting in 1s…`);
+    // Fail any in-flight requests so they never hang forever.
+    for (const { reject } of pendingRequests.values()) reject(new Error('Bridge exited unexpectedly'));
+    pendingRequests.clear();
+    bridge = null;
     setTimeout(startBridge, 1000);
   });
+
+  // Flush requests queued while the bridge was starting.
+  if (pendingQueue.length) {
+    for (const payload of pendingQueue) bridge.stdin.write(payload);
+    pendingQueue = [];
+  }
 }
 
 /** Send a request to the Python bridge and return a Promise. */
@@ -214,7 +235,11 @@ function callBackend(method, params = {}) {
     const id = String(++reqCounter);
     pendingRequests.set(id, { resolve, reject });
     const payload = JSON.stringify({ id, method, params }) + '\n';
-    bridge.stdin.write(payload);
+    if (bridge) {
+      bridge.stdin.write(payload);
+    } else {
+      pendingQueue.push(payload);
+    }
   });
 }
 
@@ -224,8 +249,12 @@ function callBackend(method, params = {}) {
 function registerIpc() {
   ipcMain.handle('profiles:list', () => callBackend('list_profiles'));
 
-  ipcMain.handle('profiles:create', (_, name, customPath) =>
-    callBackend('create_profile', { name, custom_path: customPath || '' })
+  ipcMain.handle('profiles:create', (_, name, customPath, hostMount) =>
+    callBackend('create_profile', {
+      name,
+      custom_path: customPath || '',
+      host_mount: hostMount || '',
+    })
   );
 
   ipcMain.handle('profiles:delete', (_, name) =>
@@ -327,6 +356,10 @@ function handleProfileArg() {
 // App lifecycle
 // ─────────────────────────────────────────────
 app.whenReady().then(async () => {
+  // Start the bridge before the window so the renderer's first IPC call can
+  // never hit a null bridge (callBackend queues until the bridge is up).
+  startBridge();
+
   // Always create the window first so the user sees the UI while we check.
   createWindow();
   registerIpc();
@@ -338,7 +371,6 @@ app.whenReady().then(async () => {
     return;
   }
 
-  startBridge();
   handleProfileArg();
 
   app.on('activate', () => {

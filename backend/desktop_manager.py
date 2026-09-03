@@ -11,11 +11,14 @@ from validator import validate_profile_name
 
 def _electron_exec() -> str:
     """Return the installed Electron app command."""
-    # Installed as /usr/local/bin/chrome-isolation or ~/bin/chrome-isolation
+    # Installed as /usr/local/bin/chrome-isolation, ~/bin/chrome-isolation,
+    # or via electron-builder .deb (/usr/bin or /opt/Chrome Isolation/)
     for candidate in (
         '/usr/local/bin/chrome-isolation',
         os.path.expanduser('~/bin/chrome-isolation'),
         os.path.expanduser('~/.local/bin/chrome-isolation'),
+        '/usr/bin/chrome-isolation',
+        '/opt/Chrome Isolation/chrome-isolation',
     ):
         if os.path.isfile(candidate):
             return candidate

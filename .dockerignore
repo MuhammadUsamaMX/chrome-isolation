@@ -1,0 +1,6 @@
+# Only the Dockerfile and container scripts are needed in the build context.
+*
+!Dockerfile
+!scripts
+!scripts/docker
+!scripts/docker/*

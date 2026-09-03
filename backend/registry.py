@@ -40,7 +40,7 @@ def get_profile(name: str) -> Optional[dict]:
     return _load().get(name)
 
 
-def register_profile(name: str, path: str) -> dict:
+def register_profile(name: str, path: str, host_mount: str = '') -> dict:
     """Add a profile to the registry. Raises if already registered."""
     name = validate_profile_name(name)
     data = _load()
@@ -49,6 +49,7 @@ def register_profile(name: str, path: str) -> dict:
     entry = {
         "name": name,
         "path": path,
+        "host_mount": host_mount,
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
     data[name] = entry

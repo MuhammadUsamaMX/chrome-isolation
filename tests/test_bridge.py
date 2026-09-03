@@ -1,0 +1,121 @@
+#!/usr/bin/env python3
+"""Tests for backend/bridge.py — run with: python3 tests/test_bridge.py
+
+Spawns the real bridge as a subprocess and exercises the newline-delimited
+JSON protocol over stdio.
+"""
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import traceback
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _spawn_bridge():
+    return subprocess.Popen(
+        [sys.executable, os.path.join(ROOT, 'backend', 'bridge.py')],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True, cwd=ROOT,
+    )
+
+
+def _exchange(proc, reqs):
+    for r in reqs:
+        proc.stdin.write(json.dumps(r) + "\n")
+    proc.stdin.flush()
+    out_lines = []
+    for _ in range(len(reqs)):
+        line = proc.stdout.readline()
+        assert line, "bridge closed stdout before sending all responses"
+        out_lines.append(line.strip())
+    return [json.loads(l) for l in out_lines]
+
+
+def test_bridge_protocol():
+    proc = None
+    try:
+        proc = _spawn_bridge()
+        resps = _exchange(proc, [
+            {"id": "1", "method": "list_profiles", "params": {}},
+            {"id": "2", "method": "bogus", "params": {}},
+        ])
+        proc.stdin.close()
+        proc.wait(timeout=30)
+        err = proc.stderr.read()
+        assert proc.returncode == 0, f"bridge exited {proc.returncode}: {err}"
+
+        # Response 1: list_profiles -> result (a list)
+        assert resps[0]['id'] == '1', resps[0]
+        assert 'result' in resps[0], resps[0]
+        assert isinstance(resps[0]['result'], list), resps[0]
+        # Response 2: unknown method -> clean error, matching id
+        assert resps[1]['id'] == '2', resps[1]
+        assert 'error' in resps[1], resps[1]
+        assert 'Unknown method' in resps[1]['error'], resps[1]
+    finally:
+        if proc and proc.poll() is None:
+            proc.kill()
+
+
+def test_create_with_host_mount_round_trip():
+    """create_profile with host_mount -> listed -> deleted (real state, cleaned up)."""
+    proc = None
+    host_tmp = tempfile.mkdtemp(prefix='bridge-host-')
+    name = f"bridge-test-{os.getpid()}"
+    try:
+        proc = _spawn_bridge()
+        resps = _exchange(proc, [
+            {"id": "3", "method": "create_profile",
+             "params": {"name": name, "host_mount": host_tmp}},
+            {"id": "4", "method": "list_profiles", "params": {}},
+            {"id": "5", "method": "delete_profile", "params": {"name": name}},
+        ])
+        proc.stdin.close()
+        proc.wait(timeout=30)
+        err = proc.stderr.read()
+        assert proc.returncode == 0, f"bridge exited {proc.returncode}: {err}"
+
+        # create -> result carries the host_mount
+        assert resps[0]['id'] == '3', resps[0]
+        assert 'error' not in resps[0], resps[0]
+        assert resps[0]['result']['host_mount'] == host_tmp, resps[0]
+
+        # list -> profile present with host_mount
+        assert resps[1]['id'] == '4', resps[1]
+        found = [p for p in resps[1]['result'] if p['name'] == name]
+        assert len(found) == 1, resps[1]
+        assert found[0]['host_mount'] == host_tmp, found
+
+        # delete -> gone
+        assert resps[2]['id'] == '5', resps[2]
+        assert resps[2]['result']['status'] == 'deleted', resps[2]
+    finally:
+        if proc and proc.poll() is None:
+            proc.kill()
+        shutil.rmtree(host_tmp, ignore_errors=True)
+
+
+def main():
+    tests = [(n, f) for n, f in sorted(globals().items())
+             if n.startswith('test_') and callable(f)]
+    failed = 0
+    for name, fn in tests:
+        try:
+            fn()
+            print(f"PASS {name}")
+        except Exception:
+            failed += 1
+            print(f"FAIL {name}")
+            traceback.print_exc()
+    print(f"\n{len(tests) - failed}/{len(tests)} passed")
+    sys.exit(1 if failed else 0)
+
+
+if __name__ == '__main__':
+    main()

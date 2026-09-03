@@ -29,7 +29,8 @@ Chrome that opens via this manager reads your host's fonts, icons, GTK theme, an
 
 - **Full profile isolation** — Docker container per profile, separate data directories
 - **Wayland-native** — runs on Wayland via `--ozone-platform=wayland`, no X11 needed
-- **Stealth mode** — stable per-profile hardware fingerprint (CPU cores, RAM, screen resolution, timezone, user-agent)
+- **Stealth mode** — each profile presents as its own machine: stable per-profile CPU core count, browser language, GPU backend (real GPU or software), timezone, user-agent, hostname, and window size
+- **Host files read-only** — your home directory (or a per-profile custom folder) is mounted read-only into each container at `/home/chrome/host`
 - **Dark / Light mode** — follows host GNOME colour scheme; toggle in titlebar
 - **Host preferences inherited** — fonts, icons, GTK theme, cursor theme all mounted read-only
 - **No localhost attack surface** — all IPC is over stdio JSON, no HTTP server
@@ -123,10 +124,10 @@ chrome-isolation
 ## Usage
 
 ### Create a profile
-Click **New Profile** in the sidebar. Give it a name (letters, numbers, dash, underscore). Optionally set a custom storage path.
+Click **New Profile** in the sidebar. Give it a name (letters, numbers, dash, underscore). Optionally set a custom storage path and a **Host Folder** — a directory from your machine mounted read-only into the container at `/home/chrome/host` (leave empty to mount your home directory).
 
 ### Launch Chrome
-Click **Launch** on any profile card. A Docker container starts and Chromium opens on your Wayland display. The container uses your host fonts, icons, and GTK theme (read-only).
+Click **Launch** on any profile card. A Docker container starts and Chromium opens on your Wayland display. The container uses your host fonts, icons, and GTK theme (read-only), and presents the profile's own machine fingerprint (CPU cores, language, GPU backend, timezone, user-agent, hostname, window size).
 
 ### Stop Chrome
 Click **Stop** on the card.
@@ -154,8 +155,9 @@ Click the moon/sun icon in the titlebar. Preference is saved across sessions.
 | **S2 — Archive extraction traversal** | `archive.py` — member-by-member validation, temp-dir staging, `tarfile filter="data"` |
 | **S3 — Localhost HTTP attack surface** | Eliminated — no Flask, all IPC via stdio JSON bridge |
 | **S4 — Orphaned custom-path profiles** | `registry.py` — JSON registry tracks all profiles with actual paths |
-| **S5 — Container over-privilege** | No `--privileged`, no `SYS_ADMIN`; `/.dockerenv` masked; realistic `shm_size`, `ulimits` |
+| **S5 — Container over-privilege** | No `--privileged`, no `SYS_ADMIN`; `/.dockerenv` masked; realistic `shm_size`, `ulimits`. The container entrypoint uses `--no-sandbox` because Docker's default seccomp profile blocks unprivileged user namespaces — the container is the security boundary |
 | **S6 — Flask dev server in production** | Eliminated — Electron replaces Flask entirely |
+| **S7 — Host files exposed to container** | Home directory (or per-profile folder) mounted **read-only** at `/home/chrome/host` — the container can read host files but never write to them |
 
 ---
 
@@ -179,14 +181,19 @@ chrome-isolation/
 │   ├── validator.py
 │   ├── desktop_manager.py
 │   └── config.py
+├── tests/                     # Backend tests
 ├── scripts/
+│   ├── build/after-pack.js    # electron-builder post-pack hook
 │   └── docker/                # Container entrypoint scripts
 │       ├── stealth-launch.sh
 │       ├── hardware-spoof.sh
 │       └── user-agent-spoof.sh
 ├── assets/icons/icon.png
+├── bridge.spec                # PyInstaller spec for the Python bridge
 ├── Dockerfile
-├── install.sh
+├── build.sh                   # AppImage / .deb / .rpm build script
+├── install.sh                 # Desktop app installer
+├── setup.sh                   # Dev environment setup
 ├── package.json
 └── requirements.txt
 ```

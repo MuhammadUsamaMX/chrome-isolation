@@ -38,27 +38,6 @@ def _safe_member_path(member_path: str) -> str:
     return member_path
 
 
-def _extract_profile_name_from_members(names: list) -> str:
-    """
-    Derive the profile name from archive member paths.
-    Requires exactly one top-level directory that matches the name rules.
-    """
-    top_level = set()
-    for n in names:
-        parts = PurePosixPath(n).parts
-        if parts:
-            top_level.add(parts[0])
-    # Remove anything that looks like a file (has extension at top level)
-    top_dirs = {t for t in top_level if '.' not in t or '/' in t.replace('\\', '/')}
-    if len(top_dirs) != 1:
-        raise ValueError(
-            f"Archive must contain exactly one top-level profile directory. "
-            f"Found: {top_dirs}"
-        )
-    name = top_dirs.pop()
-    return validate_profile_name(name)
-
-
 def import_profile(archive_path: str) -> dict:
     """
     Safely import a profile archive (.zip or .tar.gz/.tgz).
@@ -134,7 +113,13 @@ def _import_tar(archive_path: str, dest_dir: str) -> None:
             if m.isdev() or m.ischr() or m.isblk():
                 raise ValueError(f"Device file in archive: {m.name}")
 
-        tf.extractall(dest_dir, filter="data")
+        # filter="data" only exists in Python >= 3.11.4; on older versions the
+        # member-by-member validation above already rejects traversal, symlinks,
+        # hardlinks, and device files, so a plain extractall is safe.
+        try:
+            tf.extractall(dest_dir, filter="data")
+        except TypeError:
+            tf.extractall(dest_dir)
 
 
 def export_profile(profile_name: str, dest_path: str) -> str:

@@ -44,7 +44,6 @@ npm-debug.log*
 
 # App runtime data (user profiles — never commit real data)
 Chrome/
-~/.local/share/chrome-isolation-manager/
 
 # Secrets / cookies
 *.cookie

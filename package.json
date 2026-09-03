@@ -52,7 +52,7 @@
     "afterPack": "scripts/build/after-pack.js"
   },
   "keywords": ["chrome", "isolation", "docker", "profiles"],
-  "author": "",
+  "author": "MuhammadUsamaMX",
   "license": "MIT",
   "devDependencies": {
     "electron": "^35.0.0",

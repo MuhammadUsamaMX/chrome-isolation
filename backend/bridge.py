@@ -22,7 +22,7 @@ import profile_service as svc
 
 _METHODS = {
     "list_profiles":   lambda p: svc.get_all_profiles(),
-    "create_profile":  lambda p: svc.create_profile(p["name"], p.get("custom_path", "")),
+    "create_profile":  lambda p: svc.create_profile(p["name"], p.get("custom_path", ""), p.get("host_mount", "")),
     "delete_profile":  lambda p: svc.delete_profile(p["name"]),
     "start_profile":   lambda p: svc.start_profile(p["name"]),
     "stop_profile":    lambda p: svc.stop_profile(p["name"]),
@@ -46,7 +46,10 @@ def _handle(req: dict) -> dict:
     except (ValueError, FileNotFoundError) as e:
         return {"id": req_id, "error": str(e)}
     except Exception as e:
-        return {"id": req_id, "error": f"Internal error: {traceback.format_exc()}"}
+        # Full traceback to stderr for dev debugging (npm start 2>&1);
+        # the client only gets a clean, non-leaky message.
+        traceback.print_exc()
+        return {"id": req_id, "error": f"Internal error: {e}"}
 
 
 def main():

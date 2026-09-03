@@ -20,11 +20,13 @@ RUN apk add --no-cache \
         bash \
         python3 \
         coreutils \
+        util-linux \
     && addgroup -g ${GROUP_ID} chrome \
     && adduser -u ${USER_ID} -G chrome -D -s /bin/bash chrome \
     && adduser chrome audio \
     && adduser chrome video \
     && mkdir -p /home/chrome/.config/chromium /home/chrome/Downloads /home/chrome/scripts \
+    && mkdir -p /home/chrome/.runtime && chmod 700 /home/chrome/.runtime \
     && chown -R chrome:chrome /home/chrome \
     && rm -rf /var/cache/apk/* /tmp/* /var/tmp/* \
     && rm -rf /usr/share/man /usr/share/doc /usr/share/info /usr/share/locale \
@@ -45,7 +47,8 @@ ENV DISPLAY=:0
 USER chrome
 WORKDIR /home/chrome
 
-# stealth-launch.sh does NOT use --no-sandbox;
-# Docker's seccomp profile + user namespaces provide equivalent sandboxing.
+# stealth-launch.sh uses --no-sandbox: Docker's default seccomp profile blocks
+# unprivileged user-namespace creation, so Chromium's internal sandbox cannot
+# start. The container itself is the security boundary.
 ENTRYPOINT ["/home/chrome/scripts/stealth-launch.sh"]
 CMD []

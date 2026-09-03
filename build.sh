@@ -28,6 +28,17 @@ success() { printf '\033[1;32m✓ %s\033[0m\n' "$*"; }
 warn()    { printf '\033[1;33m! %s\033[0m\n' "$*"; }
 die()     { printf '\033[1;31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 
+# Install a pip package, retrying with --break-system-packages on PEP 668
+# distros (Arch, Fedora 39+, Ubuntu 23.04+) where pip refuses to touch the
+# system environment.
+pip_install() {
+  if pip install --quiet "$@"; then
+    return 0
+  fi
+  info "pip install failed (PEP 668 externally-managed environment?) — retrying with --break-system-packages..."
+  pip install --quiet --break-system-packages "$@"
+}
+
 # ── Args ──────────────────────────────────────────────────────────────────────
 BUILD_APPIMAGE=1
 BUILD_DEB=1
@@ -63,11 +74,11 @@ if [[ "$SKIP_BRIDGE" -eq 0 ]]; then
   # Install PyInstaller + docker client if not present
   if ! python3 -c "import PyInstaller" 2>/dev/null; then
     info "Installing PyInstaller..."
-    pip install --quiet pyinstaller
+    pip_install pyinstaller
   fi
   if ! python3 -c "import docker" 2>/dev/null; then
     info "Installing python-docker..."
-    pip install --quiet docker
+    pip_install docker
   fi
 
   info "Bundling Python bridge (PyInstaller)..."

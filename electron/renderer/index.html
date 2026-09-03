@@ -144,6 +144,11 @@
           <input type="text" id="inputPath" placeholder="Leave empty for default ~/Chrome/…"
                  autocomplete="off">
         </label>
+        <label>Host Folder <span class="opt">(read-only, optional)</span>
+          <input type="text" id="inputHostMount" placeholder="Leave empty to mount your home directory"
+                 autocomplete="off">
+          <small>Mounted read-only at /home/chrome/host inside the container.</small>
+        </label>
         <div class="modal-actions">
           <button type="button" class="btn btn-secondary" id="btnCreateCancel">Cancel</button>
           <button type="submit" class="btn btn-primary">Create</button>

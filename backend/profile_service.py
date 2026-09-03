@@ -26,7 +26,7 @@ def get_all_profiles() -> list:
     Also picks up any on-disk profiles not yet in the registry.
     """
     # Ensure on-disk profiles that exist but aren't in registry are included
-    from registry import _load, _save
+    from registry import _load
     data = _load()
     if os.path.isdir(CHROME_PROFILES_DIR):
         for name in os.listdir(CHROME_PROFILES_DIR):
@@ -44,6 +44,7 @@ def get_all_profiles() -> list:
         profiles.append({
             'name': p['name'],
             'path': p['path'],
+            'host_mount': p.get('host_mount', ''),
             'created_at': p.get('created_at', ''),
             'status': _docker.container_status(p['name']),
             'size_mb': _docker.profile_size_mb(p['name']),
@@ -52,7 +53,7 @@ def get_all_profiles() -> list:
     return profiles
 
 
-def create_profile(name: str, custom_path: str = '') -> dict:
+def create_profile(name: str, custom_path: str = '', host_mount: str = '') -> dict:
     name = validate_profile_name(name)
 
     if custom_path:
@@ -63,10 +64,17 @@ def create_profile(name: str, custom_path: str = '') -> dict:
     if os.path.exists(path):
         raise ValueError(f"Directory already exists: {path}")
 
+    # Optional host folder mounted read-only into the container. Empty means
+    # the user's home directory is mounted instead.
+    if host_mount:
+        host_mount = os.path.realpath(os.path.expanduser(host_mount))
+        if not os.path.isdir(host_mount):
+            raise ValueError(f"Host folder not found: {host_mount}")
+
     os.makedirs(path, exist_ok=True)
     os.makedirs(os.path.join(path, 'Downloads'), exist_ok=True)
 
-    entry = register_profile(name, path)
+    entry = register_profile(name, path, host_mount)
     create_desktop_entry(name)
     return entry
 

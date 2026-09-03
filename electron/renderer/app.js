@@ -78,6 +78,7 @@ function renderProfiles(profiles) {
       <div class="card-meta">
         <span>Storage: ${p.size_mb ?? 0} MB</span>
         <span>Desktop: ${p.has_desktop_entry ? 'Yes' : 'No'}</span>
+        <span>Host: ${p.host_mount ? esc(p.host_mount) : '~'}</span>
         ${p.created_at ? `<span>Created: ${esc(p.created_at.replace('T',' ').replace('Z',''))}</span>` : ''}
       </div>
       <div class="card-actions">
@@ -156,9 +157,10 @@ document.getElementById('createForm').addEventListener('submit', async (e) => {
   e.preventDefault();
   const name = document.getElementById('inputName').value.trim();
   const path = document.getElementById('inputPath').value.trim();
+  const hostMount = document.getElementById('inputHostMount').value.trim();
   if (!name) return;
   try {
-    await window.api.profiles.create(name, path);
+    await window.api.profiles.create(name, path, hostMount);
     toast(`Profile "${name}" created.`, 'success');
     document.getElementById('modalCreate').style.display = 'none';
     document.getElementById('createForm').reset();

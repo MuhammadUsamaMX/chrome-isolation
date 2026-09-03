@@ -27,7 +27,7 @@ die()     { printf '\033[1;31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 command -v node   >/dev/null 2>&1 || die "node not found. Install Node.js first."
 command -v npm    >/dev/null 2>&1 || die "npm not found."
 command -v docker >/dev/null 2>&1 || die "Docker not found. Install Docker first."
-[[ -d "$SRC_DIR/node_modules" ]]  || { info "Installing npm deps..."; npm --prefix "$SRC_DIR" install --omit=dev; }
+[[ -d "$SRC_DIR/node_modules" ]]  || { info "Installing npm deps..."; npm --prefix "$SRC_DIR" install; }
 
 # ── Stop old Flask service (S3: remove localhost attack surface) ───────────────
 if systemctl --user is-active --quiet "$OLD_SERVICE" 2>/dev/null; then
@@ -53,7 +53,10 @@ rsync -a --delete \
     "$SRC_DIR/backend/"     "$INSTALL_DIR/backend/"
 rsync -a --delete \
     "$SRC_DIR/scripts/"     "$INSTALL_DIR/scripts/"
+rsync -a --delete \
+    "$SRC_DIR/assets/"      "$INSTALL_DIR/assets/"
 cp "$SRC_DIR/Dockerfile"    "$INSTALL_DIR/Dockerfile"
+cp "$SRC_DIR/.dockerignore" "$INSTALL_DIR/.dockerignore"
 cp "$SRC_DIR/package.json"  "$INSTALL_DIR/package.json"
 
 # Copy node_modules (symlink or rsync depending on available space)
@@ -85,6 +88,8 @@ success "Launcher created."
 
 # ── Icon ──────────────────────────────────────────────────────────────────────
 cp "$SRC_DIR/assets/icons/icon.png" "$ICON_DIR/$APP_NAME.png"
+# backend/desktop_manager.py expects the icon at APP_DATA_DIR/icon.png
+cp "$SRC_DIR/assets/icons/icon.png" "$INSTALL_DIR/icon.png"
 success "Icon installed."
 
 # ── .desktop entry ────────────────────────────────────────────────────────────
