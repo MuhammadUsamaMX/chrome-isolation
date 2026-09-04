@@ -98,9 +98,9 @@ Download the latest **`.AppImage`** from the [Releases page](https://github.com/
 
 ```bash
 # Download, make executable, run
-wget https://github.com/MuhammadUsamaMX/chrome-isolation/releases/latest/download/chrome-isolation-1.1.0-linux-x64.AppImage
-chmod +x chrome-isolation-1.1.0-linux-x64.AppImage
-./chrome-isolation-1.1.0-linux-x64.AppImage
+wget https://github.com/MuhammadUsamaMX/chrome-isolation/releases/latest/download/chrome-isolation-1.0.0-linux-x64.AppImage
+chmod +x chrome-isolation-1.0.0-linux-x64.AppImage
+./chrome-isolation-1.0.0-linux-x64.AppImage
 ```
 
 First launch: the app checks for Docker, and builds the `isolated-chrome` container image automatically (one-time, a few minutes).
@@ -109,10 +109,10 @@ First launch: the app checks for Docker, and builds the `isolated-chrome` contai
 
 ```bash
 # Debian / Ubuntu
-sudo dpkg -i chrome-isolation-1.1.0-linux-x64.deb && sudo apt-get install -f
+sudo dpkg -i chrome-isolation-1.0.0-linux-x64.deb && sudo apt-get install -f
 
 # Fedora / RHEL
-sudo dnf install chrome-isolation-1.1.0-linux-x64.rpm
+sudo dnf install chrome-isolation-1.0.0-linux-x64.rpm
 ```
 
 ### Option C — From source (developers)
