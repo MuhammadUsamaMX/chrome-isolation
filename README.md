@@ -92,6 +92,31 @@ Docker Container (isolated-chrome image)
 
 ## Installation
 
+### Option A — Standalone binary (recommended, any Linux)
+
+Download the latest **`.AppImage`** from the [Releases page](https://github.com/MuhammadUsamaMX/chrome-isolation/releases). It runs on **any Linux distribution** — Node.js, Python, and npm are bundled inside; no compilation or package managers needed. The only system requirement is **Docker** (the app runs one container per profile — first launch offers to install it if missing).
+
+```bash
+# Download, make executable, run
+wget https://github.com/MuhammadUsamaMX/chrome-isolation/releases/latest/download/Chrome-Isolation-1.0.0.AppImage
+chmod +x Chrome-Isolation-1.0.0.AppImage
+./Chrome-Isolation-1.0.0.AppImage
+```
+
+First launch: the app checks for Docker, and builds the `isolated-chrome` container image automatically (one-time, a few minutes).
+
+### Option B — `.deb` / `.rpm` (Debian/Ubuntu, Fedora/RHEL)
+
+```bash
+# Debian / Ubuntu
+sudo dpkg -i Chrome-Isolation-1.0.0.deb && sudo apt-get install -f
+
+# Fedora / RHEL
+sudo dnf install Chrome-Isolation-1.0.0.rpm
+```
+
+### Option C — From source (developers)
+
 ```bash
 # 1. Clone
 git clone https://github.com/MuhammadUsamaMX/chrome-isolation.git
@@ -201,6 +226,7 @@ chrome-isolation/
 ├── Dockerfile
 ├── build.sh                   # AppImage / .deb / .rpm build script
 ├── install.sh                 # Desktop app installer
+├── uninstall.sh               # Full uninstaller (all install methods)
 ├── setup.sh                   # Dev environment setup
 ├── package.json
 └── requirements.txt
@@ -224,12 +250,27 @@ The renderer has zero Node.js access — all calls go through `window.api` (cont
 
 ## Uninstall
 
+### Any install method — use the script
+
+```bash
+bash <(curl -s https://raw.githubusercontent.com/MuhammadUsamaMX/chrome-isolation/main/uninstall.sh)
+# or, from a clone:
+bash uninstall.sh
+```
+
+The script confirms first, then removes: profile containers + the `isolated-chrome` Docker image, all profile data (`~/Chrome`), the app data dir (registry, proxies, signatures), launcher, `.desktop` entry, icon, and the `.deb`/`.rpm` package if installed.
+
+### Manual uninstall
+
 ```bash
 rm -rf ~/.local/share/chrome-isolation-manager
 rm ~/.local/bin/chrome-isolation
 rm ~/.local/share/applications/chrome-isolation.desktop
 rm ~/.local/share/icons/hicolor/256x256/apps/chrome-isolation.png
+rm -rf ~/Chrome                      # profile data — back it up first!
 docker rmi isolated-chrome
+# .deb:  sudo dpkg -r chrome-isolation
+# .rpm:  sudo dnf remove chrome-isolation
 ```
 
 ---
