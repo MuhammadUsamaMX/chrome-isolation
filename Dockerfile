@@ -17,6 +17,8 @@ RUN apk add --no-cache \
         libcanberra-gtk3 \
         font-noto \
         pulseaudio-alsa \
+        pipewire \
+        pipewire-pulse \
         bash \
         python3 \
         coreutils \

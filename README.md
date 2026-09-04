@@ -6,7 +6,7 @@
 
 **Run fully isolated Chrome browser profiles in Docker containers — managed from a native GNOME desktop app.**
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-6366f1.svg)](LICENSE)
+[![License: Non-Commercial](https://img.shields.io/badge/License-Non--Commercial%20(All%20Rights%20Reserved)-dc2626.svg)](LICENSE)
 [![Platform: Linux](https://img.shields.io/badge/Platform-Linux%20%28GNOME%29-10b981.svg)](#requirements)
 [![Electron](https://img.shields.io/badge/Electron-35-47848F.svg)](https://electronjs.org)
 [![Docker](https://img.shields.io/badge/Docker-required-2496ED.svg)](https://docs.docker.com/get-docker/)
@@ -277,4 +277,4 @@ docker rmi isolated-chrome
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+Non-Commercial — All rights reserved by MuhammadUsamaMX. See [LICENSE](LICENSE) for full terms.

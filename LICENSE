@@ -1,21 +1,137 @@
-MIT License
+CHROME ISOLATION MANAGER — PROPRIETARY LICENSE
+Copyright (c) 2026 MuhammadUsamaMX (Muhammad Usama)
 
-Copyright (c) 2026 MuhammadUsamaMX
+All rights reserved.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+────────────────────────────────────────────────────────────────────────────
+1. DEFINITIONS
+────────────────────────────────────────────────────────────────────────────
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+  "Software"        means the Chrome Isolation Manager source code, binaries,
+                    build artifacts, scripts, documentation, and all associated
+                    files distributed with this repository.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+  "Author"          means MuhammadUsamaMX (Muhammad Usama).
+
+  "You"             means any individual or legal entity exercising rights
+                    under this license.
+
+  "Commercial Use"  means any use primarily intended for or directed toward
+                    commercial advantage or monetary compensation, including
+                    but not limited to: selling, licensing, SaaS offerings,
+                    paid support, bundling in paid products, or use within a
+                    commercial organisation to generate revenue.
+
+  "Derivative Work" means any work that modifies, adapts, extends, or builds
+                    upon the Software, including but not limited to forks,
+                    plugins, wrappers, integrations, containers, or any work
+                    incorporating substantial portions of the Software.
+
+────────────────────────────────────────────────────────────────────────────
+2. PERMITTED USES (FREE)
+────────────────────────────────────────────────────────────────────────────
+
+  You are granted a non-exclusive, worldwide, revocable, free-of-charge
+  licence to use, copy, and run the Software for PERSONAL, NON-COMMERCIAL,
+  EDUCATIONAL, and RESEARCH purposes, provided that:
+
+    (a) You retain this copyright notice and all licence terms in every copy
+        or substantial portion of the Software;
+
+    (b) You provide clear and visible attribution to the Author:
+
+        "Chrome Isolation Manager by MuhammadUsamaMX"
+        https://github.com/MuhammadUsamaMX/chrome-isolation
+
+        Attribution must appear in:
+        - Source files that are modified or distributed
+        - Binary distributions, splash screens, About dialogs, or README
+        - Public-facing documentation, blog posts, or presentations
+          that showcase the Software;
+
+    (c) You do NOT distribute Derivative Works publicly without the
+        Author's express written permission.
+
+────────────────────────────────────────────────────────────────────────────
+3. PROHIBITED USES
+────────────────────────────────────────────────────────────────────────────
+
+  WITHOUT THE AUTHOR'S EXPRESS PRIOR WRITTEN PERMISSION, YOU MAY NOT:
+
+    (a) Use the Software, in whole or in part, for ANY Commercial Purpose;
+
+    (b) Sell, sublicense, rent, lease, or otherwise distribute the Software
+        or Derivative Works to third parties for a fee or in exchange for
+        anything of value;
+
+    (c) Offer the Software or a Derivative Work as a managed service, SaaS,
+        hosted solution, or API where the primary value is the Software
+        itself;
+
+    (d) Remove, alter, or obscure any copyright notices, attribution
+        requirements, or licence terms;
+
+    (e) Use the Author's name, trademarks, or branding in any way that
+        implies endorsement, sponsorship, or affiliation without explicit
+        written consent;
+
+    (f) Distribute Derivative Works publicly (private/internal use of
+        modified versions is permitted under Section 2).
+
+────────────────────────────────────────────────────────────────────────────
+4. INTELLECTUAL PROPERTY
+────────────────────────────────────────────────────────────────────────────
+
+  The Software and all intellectual property rights therein are and remain
+  the exclusive property of the Author. This licence does not transfer any
+  ownership rights. All rights not expressly granted herein are reserved.
+
+────────────────────────────────────────────────────────────────────────────
+5. CONTRIBUTIONS
+────────────────────────────────────────────────────────────────────────────
+
+  Any contributions, pull requests, or patches submitted to the repository
+  are understood to be licensed under the same terms as this licence. The
+  Author retains the right to use, modify, or reject any contribution at
+  their sole discretion.
+
+────────────────────────────────────────────────────────────────────────────
+6. DISCLAIMER OF WARRANTY
+────────────────────────────────────────────────────────────────────────────
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+  OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. IN NO EVENT SHALL
+  THE AUTHOR BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER
+  IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING FROM, OUT OF, OR
+  IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+
+────────────────────────────────────────────────────────────────────────────
+7. TERMINATION
+────────────────────────────────────────────────────────────────────────────
+
+  This licence is effective until terminated. Your rights under this licence
+  terminate automatically if you breach any of its terms. Upon termination,
+  you must cease all use of the Software and destroy all copies in your
+  possession or control.
+
+────────────────────────────────────────────────────────────────────────────
+8. GOVERNING LAW
+────────────────────────────────────────────────────────────────────────────
+
+  This licence shall be governed by and construed in accordance with the
+  laws of Pakistan. Any disputes arising under or in connection with this
+  licence shall be subject to the exclusive jurisdiction of the courts
+  of Lahore, Pakistan.
+
+────────────────────────────────────────────────────────────────────────────
+9. CONTACT
+────────────────────────────────────────────────────────────────────────────
+
+  For commercial licensing, permissions, or enquiries:
+
+    GitHub : https://github.com/MuhammadUsamaMX
+    Email  : (contact via GitHub profile)
+
+────────────────────────────────────────────────────────────────────────────

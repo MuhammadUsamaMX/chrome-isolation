@@ -53,7 +53,7 @@
   },
   "keywords": ["chrome", "isolation", "docker", "profiles"],
   "author": "MuhammadUsamaMX",
-  "license": "MIT",
+  "license": "SEE LICENSE IN LICENSE",
   "devDependencies": {
     "electron": "^35.0.0",
     "electron-builder": "^25.1.8"

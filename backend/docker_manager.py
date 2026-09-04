@@ -321,8 +321,9 @@ class DockerManager:
             'XDG_SESSION_TYPE': 'wayland',
             'GDK_BACKEND':      'wayland',
             'QT_QPA_PLATFORM':  'wayland',
-            # Audio
-            'PULSE_SERVER': 'unix:/home/chrome/.runtime/pulse/native',
+            # Audio — PipeWire (preferred) + PulseAudio fallback
+            'PULSE_SERVER':   'unix:/home/chrome/.runtime/pulse/native',
+            'PIPEWIRE_REMOTE': '/home/chrome/.runtime/pipewire-0',
             # Profile
             'CHROME_PROFILE': profile_name,
             # Locale

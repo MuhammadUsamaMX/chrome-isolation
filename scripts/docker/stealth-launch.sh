@@ -83,6 +83,12 @@ FLAGS=(
     "${GL_FLAGS[@]}"
 )
 
+# Audio — PipeWire finds the socket via PIPEWIRE_REMOTE; PulseAudio via
+# PULSE_SERVER. Both are set by docker_manager.py but export explicitly
+# so Chromium (and any helper like speech-dispatcher) can see them.
+export PULSE_SERVER="${PULSE_SERVER:-unix:/home/chrome/.runtime/pulse/native}"
+export PIPEWIRE_REMOTE="${PIPEWIRE_REMOTE:-/home/chrome/.runtime/pipewire-0}"
+
 # Note: no --start-maximized — the window opens at the profile's spoofed size
 # so window dimensions stay consistent with the machine signature.
 exec taskset -c "0-$((SPOOF_CORES-1))" chromium-browser "${FLAGS[@]}" "$@"
