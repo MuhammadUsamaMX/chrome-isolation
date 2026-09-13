@@ -21,13 +21,13 @@
       <span class="titlebar-title">Chrome Isolation</span>
     </div>
     <div class="titlebar-controls">
-      <button class="wc-btn wc-theme" id="btnTheme" title="Toggle light/dark">
+      <button class="wc-btn wc-theme" id="btnTheme" title="Toggle light/dark" aria-label="Toggle theme">
         <!-- moon icon (dark mode indicator) -->
-        <svg id="iconMoon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+        <svg id="iconMoon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
           <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
         </svg>
         <!-- sun icon (light mode indicator) -->
-        <svg id="iconSun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="display:none">
+        <svg id="iconSun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="display:none" aria-hidden="true">
           <circle cx="12" cy="12" r="5"/>
           <line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/>
           <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
@@ -35,16 +35,16 @@
           <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
         </svg>
       </button>
-      <button class="wc-btn wc-min"   id="btnWinMin"   title="Minimize">
-        <svg viewBox="0 0 12 12" fill="currentColor"><rect x="0" y="5.5" width="12" height="1"/></svg>
+      <button class="wc-btn wc-min"   id="btnWinMin"   title="Minimize" aria-label="Minimize window">
+        <svg viewBox="0 0 12 12" fill="currentColor" aria-hidden="true"><rect x="0" y="5.5" width="12" height="1"/></svg>
       </button>
-      <button class="wc-btn wc-max"   id="btnWinMax"   title="Maximize">
-        <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.2">
+      <button class="wc-btn wc-max"   id="btnWinMax"   title="Maximize" aria-label="Maximize window">
+        <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.2" aria-hidden="true">
           <rect x="1.5" y="1.5" width="9" height="9" rx="1"/>
         </svg>
       </button>
-      <button class="wc-btn wc-close" id="btnWinClose" title="Close">
-        <svg viewBox="0 0 12 12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+      <button class="wc-btn wc-close" id="btnWinClose" title="Close" aria-label="Close window">
+        <svg viewBox="0 0 12 12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true">
           <line x1="1.5" y1="1.5" x2="10.5" y2="10.5"/>
           <line x1="10.5" y1="1.5" x2="1.5" y2="10.5"/>
         </svg>
@@ -151,9 +151,9 @@
             </svg>
             <input type="text" id="inputSearch" placeholder="Search profiles…" autocomplete="off">
           </div>
-          <button class="icon-btn" id="btnRefresh" title="Refresh">
+          <button class="icon-btn" id="btnRefresh" title="Refresh" aria-label="Refresh profiles">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
-                 stroke="currentColor" stroke-width="2">
+                 stroke="currentColor" stroke-width="2" aria-hidden="true">
               <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/>
               <path d="M21 3v5h-5"/>
               <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/>
@@ -231,9 +231,9 @@
   </div>
 
   <!-- Create modal -->
-  <div class="modal-overlay" id="modalCreate" style="display:none;">
+  <div class="modal-overlay" id="modalCreate" role="dialog" aria-modal="true" aria-labelledby="createTitle" style="display:none;">
     <div class="modal">
-      <h2>New Profile</h2>
+      <h2 id="createTitle">New Profile</h2>
       <p class="modal-sub">Set up a new isolated browser profile</p>
       <form id="createForm">
         <label>Profile Name
@@ -271,7 +271,7 @@
   </div>
 
   <!-- Edit modal -->
-  <div class="modal-overlay" id="modalEdit" style="display:none;">
+  <div class="modal-overlay" id="modalEdit" role="dialog" aria-modal="true" aria-labelledby="editTitle" style="display:none;">
     <div class="modal">
       <h2 id="editTitle">Edit Profile</h2>
       <p class="modal-sub">Update the read-only host folder and proxy.</p>
@@ -327,9 +327,9 @@
   </div>
 
   <!-- Manage Proxies modal -->
-  <div class="modal-overlay" id="modalProxies" style="display:none;">
+  <div class="modal-overlay" id="modalProxies" role="dialog" aria-modal="true" aria-labelledby="proxiesTitle" style="display:none;">
     <div class="modal modal-wide">
-      <h2>Proxies</h2>
+      <h2 id="proxiesTitle">Proxies</h2>
       <p class="modal-sub">Shared proxies available to every profile.</p>
       <div id="proxyList" class="proxy-list"></div>
       <form id="proxyForm" class="proxy-form">
@@ -346,7 +346,7 @@
   </div>
 
   <!-- Confirm modal -->
-  <div class="modal-overlay" id="modalConfirm" style="display:none;">
+  <div class="modal-overlay" id="modalConfirm" role="dialog" aria-modal="true" aria-labelledby="confirmTitle" style="display:none;">
     <div class="modal">
       <h2 id="confirmTitle">Confirm</h2>
       <p id="confirmMsg"></p>

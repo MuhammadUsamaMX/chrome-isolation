@@ -457,6 +457,41 @@ window.api.win.onMaximizeChange(isMax => {
   document.getElementById('btnWinMax').classList.toggle('is-maximized', isMax);
 });
 
+// ── Keyboard & Overlay Modal Dismissal ─────────────────────────────────────
+function closeAllModals() {
+  const modalIds = ['modalCreate', 'modalEdit', 'modalProxies', 'modalConfirm'];
+  modalIds.forEach(id => {
+    const m = document.getElementById(id);
+    if (m && m.style.display !== 'none') {
+      if (id === 'modalConfirm') {
+        const noBtn = document.getElementById('btnConfirmNo');
+        if (noBtn) noBtn.click();
+      } else {
+        m.style.display = 'none';
+        if (id === 'modalCreate') {
+          const form = document.getElementById('createForm');
+          if (form) form.reset();
+        }
+        if (id === 'modalEdit') editingName = null;
+      }
+    }
+  });
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    closeAllModals();
+  }
+});
+
+document.querySelectorAll('.modal-overlay').forEach(overlay => {
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) {
+      closeAllModals();
+    }
+  });
+});
+
 // ── Initial load ──────────────────────────────────────────────────────────────
 loadProfiles();
 loadProxies();
