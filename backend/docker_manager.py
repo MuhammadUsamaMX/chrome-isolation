@@ -80,6 +80,25 @@ class DockerManager:
         except docker.errors.NotFound:
             return "not_found"
 
+    def all_container_statuses(self) -> dict:
+        """Return a mapping of profile_name -> status for all profile containers in a single Docker API call.
+
+        Optimizes get_all_profiles by reducing Docker daemon socket roundtrips from O(N) to O(1).
+        """
+        try:
+            containers = self.client.containers.list(all=True)
+            prefix = CONTAINER_PREFIX
+            prefix_len = len(prefix)
+            statuses = {}
+            for c in containers:
+                cname = (getattr(c, 'name', '') or '').lstrip('/')
+                if cname.startswith(prefix):
+                    prof_name = cname[prefix_len:]
+                    statuses[prof_name] = c.status
+            return statuses
+        except Exception:
+            return {}
+
     # ---------------------------------------------------------------- profile size
     def profile_size_mb(self, profile_name: str) -> float:
         profile_name = validate_profile_name(profile_name)
