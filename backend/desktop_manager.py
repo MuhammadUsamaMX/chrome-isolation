@@ -4,6 +4,7 @@ Generates per-profile .desktop files that launch via the installed Electron bina
 """
 import os
 import re
+import subprocess
 
 from config import DESKTOP_ENTRIES_DIR, APP_ICON, APP_DATA_DIR
 from validator import validate_profile_name
@@ -59,7 +60,13 @@ def create_desktop_entry(profile_name: str) -> dict:
     with open(path, 'w') as f:
         f.write(content)
     os.chmod(path, 0o755)
-    os.system(f'update-desktop-database "{DESKTOP_ENTRIES_DIR}" > /dev/null 2>&1')
+    # Security: Use subprocess.run with argument list (shell=False) instead of os.system
+    # to avoid command injection risks.
+    try:
+        subprocess.run(['update-desktop-database', DESKTOP_ENTRIES_DIR],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+    except FileNotFoundError:
+        pass
     return {"status": "created", "path": path}
 
 
@@ -68,7 +75,13 @@ def remove_desktop_entry(profile_name: str) -> dict:
     path = desktop_file_path(profile_name)
     if os.path.exists(path):
         os.remove(path)
-        os.system(f'update-desktop-database "{DESKTOP_ENTRIES_DIR}" > /dev/null 2>&1')
+        # Security: Use subprocess.run with argument list (shell=False) instead of os.system
+        # to avoid command injection risks.
+        try:
+            subprocess.run(['update-desktop-database', DESKTOP_ENTRIES_DIR],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        except FileNotFoundError:
+            pass
         return {"status": "removed"}
     return {"status": "not_found"}
 
