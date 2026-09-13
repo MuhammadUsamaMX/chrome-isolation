@@ -242,14 +242,19 @@
           <small>Letters, numbers, dash and underscore only.</small>
         </label>
         <label>Custom Location <span class="opt">(optional)</span>
-          <input type="text" id="inputPath" placeholder="Leave empty for default ~/Chrome/…"
-                 autocomplete="off">
+          <div class="input-row">
+            <input type="text" id="inputPath" placeholder="Leave empty for default ~/Chrome/…"
+                   readonly style="cursor: pointer;" autocomplete="off">
+            <button type="button" class="btn btn-secondary btn-sm" id="btnBrowsePath">Browse…</button>
+            <button type="button" class="btn btn-secondary btn-sm" id="btnClearPath" title="Clear custom location" aria-label="Clear custom location">✕</button>
+          </div>
         </label>
         <label>Host Folder <span class="opt">(read-only, optional)</span>
           <div class="input-row">
             <input type="text" id="inputHostMount" placeholder="Leave empty to mount your home directory"
-                   autocomplete="off">
+                   readonly style="cursor: pointer;" autocomplete="off">
             <button type="button" class="btn btn-secondary btn-sm" id="btnBrowseCreate">Browse…</button>
+            <button type="button" class="btn btn-secondary btn-sm" id="btnClearCreate" title="Clear host folder" aria-label="Clear host folder">✕</button>
           </div>
           <small>Mounted read-only at /home/chrome/host inside the container.</small>
         </label>
@@ -279,8 +284,9 @@
         <label>Host Folder <span class="opt">(read-only, optional)</span>
           <div class="input-row">
             <input type="text" id="editHostMount" placeholder="Leave empty to mount your home directory"
-                   autocomplete="off">
+                   readonly style="cursor: pointer;" autocomplete="off">
             <button type="button" class="btn btn-secondary btn-sm" id="btnBrowseEdit">Browse…</button>
+            <button type="button" class="btn btn-secondary btn-sm" id="btnClearEdit" title="Clear host folder" aria-label="Clear host folder">✕</button>
           </div>
           <small>Mounted read-only at /home/chrome/host inside the container.</small>
         </label>

@@ -266,8 +266,20 @@ async function browseFolder(inputId) {
     toast(`Folder picker failed: ${e.message}`, 'error');
   }
 }
-document.getElementById('btnBrowseCreate').addEventListener('click', () => browseFolder('inputHostMount'));
-document.getElementById('btnBrowseEdit').addEventListener('click', () => browseFolder('editHostMount'));
+
+// Bind folder picker to inputs (when clicked) and Browse buttons across the app
+['inputPath', 'inputHostMount', 'editHostMount'].forEach(id => {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener('click', () => browseFolder(id));
+});
+
+document.getElementById('btnBrowsePath')?.addEventListener('click', () => browseFolder('inputPath'));
+document.getElementById('btnBrowseCreate')?.addEventListener('click', () => browseFolder('inputHostMount'));
+document.getElementById('btnBrowseEdit')?.addEventListener('click', () => browseFolder('editHostMount'));
+
+document.getElementById('btnClearPath')?.addEventListener('click', () => { document.getElementById('inputPath').value = ''; });
+document.getElementById('btnClearCreate')?.addEventListener('click', () => { document.getElementById('inputHostMount').value = ''; });
+document.getElementById('btnClearEdit')?.addEventListener('click', () => { document.getElementById('editHostMount').value = ''; });
 
 // ── Edit modal ────────────────────────────────────────────────────────────────
 let editingName = null;
