@@ -3,31 +3,31 @@
    Modern, minimal, soft. Dark by default, light via [data-theme].
    ═══════════════════════════════════════════════════════════════ */
 
-/* ── Design tokens — DARK (default) ──────────────────────────── */
+/* ── Design tokens — DARK (default, OLED-friendly) ───────────── */
 :root {
-  --bg:          #0d0f13;
-  --bg2:         #14171d;
-  --bg3:         #1d2129;
-  --surface:     rgba(23, 27, 34, 0.88);
-  --border:      rgba(255, 255, 255, 0.06);
-  --titlebar-bg: rgba(10, 12, 16, 0.55);
-  --text:        #e8eaed;
-  --text2:       #8a919c;
+  --bg:          #000000;
+  --bg2:         #090b0e;
+  --bg3:         #13171f;
+  --surface:     rgba(18, 22, 30, 0.78);
+  --border:      rgba(255, 255, 255, 0.09);
+  --titlebar-bg: rgba(0, 0, 0, 0.65);
+  --text:        #f1f3f5;
+  --text2:       #9aa0a6;
   --primary:     #4f8cff;
   --primary-h:   #3b76e8;
-  --primary-soft: rgba(79, 140, 255, 0.14);
+  --primary-soft: rgba(79, 140, 255, 0.16);
   --success:     #2fbf71;
-  --success-soft: rgba(47, 191, 113, 0.14);
+  --success-soft: rgba(47, 191, 113, 0.16);
   --danger:      #f05252;
-  --danger-soft: rgba(240, 82, 82, 0.14);
+  --danger-soft: rgba(240, 82, 82, 0.16);
   --warning:     #f5a623;
   --radius:      16px;
   --radius-sm:   10px;
   --win-radius:  16px;
   --sidebar-w:   224px;
   --titlebar-h:  42px;
-  --shadow:      0 24px 60px rgba(0, 0, 0, .6);
-  --shadow-sm:   0 6px 20px rgba(0, 0, 0, .35);
+  --shadow:      0 24px 60px rgba(0, 0, 0, .75);
+  --shadow-sm:   0 6px 20px rgba(0, 0, 0, .4);
 }
 
 /* ── Design tokens — LIGHT ───────────────────────────────────── */
@@ -480,13 +480,22 @@ body {
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* ── Focus Visible Accessibility ────────────────────────────── */
+.wc-btn:focus-visible,
+.btn:focus-visible,
+.nav-item:focus-visible,
+.icon-btn:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
 /* ── Modal ─────────────────────────────────────────────────── */
 .modal-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, .55);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
+  background: rgba(0, 0, 0, 0.65);
+  backdrop-filter: blur(16px) saturate(180%);
+  -webkit-backdrop-filter: blur(16px) saturate(180%);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -494,15 +503,22 @@ body {
   animation: fadeIn .18s ease;
 }
 .modal {
-  background: var(--bg2);
+  background: var(--surface);
+  backdrop-filter: blur(24px) saturate(180%);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
   border: 1px solid var(--border);
-  border-radius: 18px;
+  border-radius: 20px;
   padding: 1.75rem 2rem;
   width: min(460px, 92vw);
   display: flex;
   flex-direction: column;
   gap: 1rem;
   box-shadow: var(--shadow);
+  animation: modalIn .22s cubic-bezier(0.16, 1, 0.3, 1);
+}
+@keyframes modalIn {
+  from { opacity: 0; transform: scale(0.95) translateY(8px); }
+  to   { opacity: 1; transform: scale(1) translateY(0); }
 }
 .modal h2 { font-size: 1.15rem; font-weight: 700; letter-spacing: -.01em; }
 .modal-sub { font-size: .84rem; color: var(--text2); }
@@ -622,4 +638,14 @@ body {
 @keyframes fadeIn {
   from { opacity: 0; transform: translateY(6px); }
   to   { opacity: 1; transform: none; }
+}
+
+/* ── Reduced Motion Accessibility ──────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
