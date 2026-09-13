@@ -68,6 +68,9 @@ def get_all_profiles() -> list:
                 except ValueError:
                     pass
 
+    # Batch fetch all container statuses in a single Docker API call (O(1) HTTP requests)
+    container_statuses = _docker.all_container_statuses()
+
     profiles = []
     for p in list_profiles():
         profiles.append({
@@ -77,7 +80,7 @@ def get_all_profiles() -> list:
             'proxy': p.get('proxy', ''),
             'machine': _read_machine(p['path']),
             'created_at': p.get('created_at', ''),
-            'status': _docker.container_status(p['name']),
+            'status': container_statuses.get(p['name'], 'not_found'),
             'size_mb': _docker.profile_size_mb(p['name']),
             'has_desktop_entry': desktop_entry_exists(p['name']),
         })

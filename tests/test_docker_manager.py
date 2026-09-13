@@ -27,6 +27,12 @@ class _FakeContainer:
     status = 'running'
 
 
+class _FakeNamedContainer:
+    def __init__(self, name, status='running'):
+        self.name = name
+        self.status = status
+
+
 class _FakeContainers:
     def __init__(self):
         self.run_kwargs = None
@@ -37,6 +43,13 @@ class _FakeContainers:
     def run(self, **kwargs):
         self.run_kwargs = kwargs
         return _FakeContainer()
+
+    def list(self, all=False):
+        return [
+            _FakeNamedContainer('chrome-alice', 'running'),
+            _FakeNamedContainer('chrome-bob', 'exited'),
+            _FakeNamedContainer('other-container', 'running'),
+        ]
 
 
 class _FakeImages:
@@ -281,6 +294,18 @@ def test_start_container_saved_proxy_name():
         assert '--proxy-server=socks5://host.docker.internal:10080' in cmd, cmd
         assert kwargs.get('extra_hosts') == {'host.docker.internal': 'host-gateway'}, kwargs
         shutil.rmtree(store_tmp, ignore_errors=True)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_all_container_statuses():
+    m, tmp = _make_manager()
+    try:
+        statuses = m.all_container_statuses()
+        assert statuses == {
+            'alice': 'running',
+            'bob': 'exited',
+        }, f"unexpected statuses: {statuses}"
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
