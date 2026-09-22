@@ -78,10 +78,19 @@ success "Docker image built."
 
 # ── Launcher script ────────────────────────────────────────────────────────────
 info "Creating launcher at $BIN_DIR/$APP_NAME..."
+
+# Sanitize electron path.txt — npm writes a trailing newline that breaks the
+# .bin/electron wrapper (Node reads "electron\n", spawns with ENOENT).
+PATH_TXT="$INSTALL_DIR/node_modules/electron/path.txt"
+if [[ -f "$PATH_TXT" ]]; then
+    printf '%s' "$(cat "$PATH_TXT")" > "$PATH_TXT"
+    success "Sanitized $PATH_TXT (stripped trailing newline)."
+fi
+
 cat > "$BIN_DIR/$APP_NAME" <<LAUNCHER
 #!/usr/bin/env bash
 # Chrome Isolation Manager launcher
-exec node "$INSTALL_DIR/node_modules/.bin/electron" "$INSTALL_DIR" "\$@"
+exec "$INSTALL_DIR/node_modules/electron/dist/electron" "$INSTALL_DIR" "\$@"
 LAUNCHER
 chmod +x "$BIN_DIR/$APP_NAME"
 success "Launcher created."
