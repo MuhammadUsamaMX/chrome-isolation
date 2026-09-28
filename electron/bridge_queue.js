@@ -37,8 +37,14 @@ const BRIDGE_BACKOFF_BASE_MS = 1000;
 const BRIDGE_BACKOFF_MAX_MS = 30000;
 const BRIDGE_MAX_FAILURES = 5;
 const BRIDGE_STABLE_MS = 10000;
-/** One-shot retry for a payload queued onto a not-yet-writable pipe. */
+/** Retry cadence for a payload queued onto a not-yet-writable pipe. */
 const FLUSH_RETRY_MS = 50;
+/**
+ * Upper bound on consecutive retries for one stranded queue: 50 * 20 = 1s of
+ * polling. A bridge whose pipe is not up after that is not coming back soon, and
+ * the restart / give-up path owns the queue from there.
+ */
+const FLUSH_RETRY_MAX = 20;
 
 /**
  * Delay before restart number `failures` (1-based).
@@ -211,21 +217,34 @@ function createBridgeQueue(deps) {
   }
 
   /**
-   * If a payload had to be queued because the live bridge's stdin was not
-   * writable, arrange for another flush attempt.
+   * Keep retrying the flush while a payload is owed and the pipe is not up.
    *
-   * Covers the window where the process is alive but its pipe only becomes
-   * writable a moment later, so nothing else would ever trigger a retry. The
-   * timer is one-shot, guarded on the queue still being non-empty, and cleared
-   * as soon as the queue drains — so it cannot poll forever. If the bridge dies
-   * instead, 'error'/'exit' fire and the restart path takes over.
+   * Covers the window where the process is alive but its stdin only becomes
+   * writable a moment later, so nothing else would ever trigger a retry.
+   *
+   * This re-arms itself while the queue is non-empty, which the previous
+   * one-shot version did not: it fired once, found the pipe still dead, and
+   * gave up — so a pipe that came up a moment later stranded the payload with
+   * no pending timer and no 'ready' event to wake it. Bounded by
+   * FLUSH_RETRY_MAX so a permanently dead bridge costs a bounded amount of
+   * polling rather than a timer for the life of the process; when the budget is
+   * spent the queue is left owed, and the restart/give-up path owns it from
+   * there. If the bridge dies in the meantime, 'error'/'exit' fire and the
+   * restart path takes over.
    */
+  let flushRetries = 0;
   function scheduleFlushRetry() {
+    if (flushRetries >= FLUSH_RETRY_MAX) return;
     if (flushRetryTimer) return;
     flushRetryTimer = timers.setTimeout(() => {
       flushRetryTimer = null;
-      if (!pendingQueue.length) return;
+      // The queue drained — nothing owed, so stop and let the next request
+      // schedule a fresh retry if it needs one.
+      if (!pendingQueue.length) { flushRetries = 0; return; }
+      flushRetries += 1;
       flushQueue(bridge);
+      if (pendingQueue.length) scheduleFlushRetry();
+      else flushRetries = 0;
     }, FLUSH_RETRY_MS);
     if (flushRetryTimer && flushRetryTimer.unref) flushRetryTimer.unref();
   }
