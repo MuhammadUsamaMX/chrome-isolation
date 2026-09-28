@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import profile_service as svc
 import proxy_store
+import image_update
 
 
 _METHODS = {
@@ -34,6 +35,14 @@ _METHODS = {
     "list_proxies":    lambda p: proxy_store.list_proxies(),
     "add_proxy":       lambda p: proxy_store.add_proxy(p["name"], p["url"]),
     "delete_proxy":    lambda p: proxy_store.delete_proxy(p["name"]),
+
+    # Chromium auto-update. `image_update_check` STARTS work and RETURNS
+    # IMMEDIATELY — the rebuild happens on a background thread, so no caller
+    # ever waits on a build. `image_update_status` is a cheap in-memory read
+    # for the UI to poll. Neither touches Docker on the request path.
+    "image_update_check":  lambda p: image_update.check_and_start(
+        force=(True if p.get("force") else None), reason=p.get("reason", "manual")),
+    "image_update_status": lambda p: image_update.get_update_status(),
 }
 
 
