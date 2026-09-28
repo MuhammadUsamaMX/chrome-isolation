@@ -33,4 +33,11 @@ contextBridge.exposeInMainWorld('api', {
     isMaximized:     ()   => ipcRenderer.invoke('window:isMaximized'),
     onMaximizeChange: (cb) => ipcRenderer.on('window:maximized', (_e, state) => cb(state)),
   },
+
+  // Backend bridge lifecycle (F8 / T6). Fired when the Python bridge could not
+  // be started and the app has given up restarting it — any request that was
+  // in flight has been cancelled and must be retried by the user.
+  bridge: {
+    onFailed: (cb) => ipcRenderer.on('bridge:failed', (_e, info) => cb(info)),
+  },
 });
