@@ -17,8 +17,22 @@ directory", NOT "mount my home directory". The value stored in profiles.json
 is left exactly as-is — we do not rewrite the registry — so profiles created
 before this fix silently become safe instead of quietly leaking.
 
-An explicit, non-empty `host_mount` is still honoured verbatim: that is a
-deliberate user choice. It is, however, validated (see `validate_host_mount`).
+An explicit, non-empty `host_mount` is still honoured: that is a deliberate
+user choice. It is, however, validated (see `validate_host_mount`), and the
+GUARANTEE is narrower than "any explicit path is fine":
+
+WHAT CAN AND CANNOT BE SHARED EXPLICITLY
+----------------------------------------
+  ALLOWED   a dedicated directory, and a *subfolder* of your own home
+            (e.g. ~/share) — nothing in the home folder itself is exempt.
+  REFUSED   the home directory itself, however it is spelled: `~`, `~/`,
+            `$HOME`, the expanded absolute path, or `~/.gnupg/..`.
+            `/home` is in `_FORBIDDEN_ROOTS` only as an exact match so that
+            subfolders stay shareable; that same exemption is why the home
+            directory needed its own explicit check, and it has one
+            (`_reject_home_itself`).
+  REFUSED   system roots/subtrees and credential stores (~/.ssh, ~/.gnupg,
+            keyrings, …) regardless of symlinks or `..` traversal.
 
 Default share path format::
 
@@ -44,9 +58,12 @@ _FORBIDDEN_ROOTS = frozenset({
     '/srv', '/sys', '/usr', '/var',
 })
 
-# Roots whose *subtrees* are also refused. `/home` is intentionally absent: a
-# user may deliberately share a subfolder of their own home, and the sensitive
-# credential stores below are already blocked individually.
+# Roots whose *subtrees* are also refused. `/home` is intentionally absent so
+# that a user may deliberately share a subfolder of their own home; the
+# sensitive credential stores below are blocked individually, and the home
+# directory *itself* is refused explicitly by `_reject_home_itself` (otherwise
+# `~`, `~/` and `~/.gnupg/..` would resolve to the whole home dir and re-arm
+# the F1 finding).
 _FORBIDDEN_SUBTREES = frozenset({
     '/bin', '/boot', '/dev', '/etc', '/lib', '/lib32', '/lib64', '/libx32',
     '/opt', '/proc', '/root', '/run', '/sbin', '/srv', '/sys', '/usr', '/var',
@@ -102,9 +119,42 @@ def _is_within(path: str, root: str) -> bool:
     return path == root or path.startswith(root + os.sep)
 
 
+def _home_dir() -> str:
+    """The caller's home directory, fully resolved. Computed per call because
+    a test (or `su`) can change it between calls."""
+    return os.path.realpath(os.path.expanduser('~'))
+
+
+def _reject_home_itself(path: str) -> None:
+    """
+    Raise ValueError if `path` IS the user's home directory.
+
+    `_FORBIDDEN_ROOTS` contains `/home` but only as an exact match, so
+    `$HOME`, `~`, `~/` and `~/.gnupg/..` all resolve to the home directory and
+    would otherwise be accepted — re-arming the original F1 finding with a
+    single typed character. Subfolders of home are NOT affected: only the exact
+    directory is refused.
+    """
+    home = _home_dir()
+    if path == home:
+        raise ValueError(
+            f"Refusing to mount your entire home directory ({path}). "
+            "Share a specific subfolder inside it instead, e.g. "
+            f"{os.path.join(home, 'share')}."
+        )
+
+
 def _reject_sensitive(path: str) -> None:
     """Raise ValueError if `path` is (or lives inside) a sensitive location."""
-    home = os.path.realpath(os.path.expanduser('~'))
+    home = _home_dir()
+    if path == home:
+        # Checked here as well as separately so the error is emitted even if a
+        # future edit drops the call site of _reject_home_itself().
+        raise ValueError(
+            f"Refusing to mount your entire home directory ({path}). "
+            "Share a specific subfolder inside it instead, e.g. "
+            f"{os.path.join(home, 'share')}."
+        )
     for sub in _SENSITIVE_HOME_SUBPATHS:
         sensitive = os.path.join(home, sub)
         if _is_within(path, sensitive):
@@ -125,6 +175,8 @@ def validate_host_mount(raw: str) -> str:
     Raises ValueError for:
       * non-string input
       * forbidden roots (`/`, `/etc`, `/home`, `/usr`, …)
+      * the user's home directory itself, in any spelling (`~`, `~/`,
+        `$HOME`, `~/.gnupg/..`) — subfolders of home remain allowed
       * credential stores (~/.ssh, ~/.gnupg, keyrings, …)
       * path traversal or symlinks that resolve into either of the above
       * anything that is not an existing directory
@@ -160,6 +212,10 @@ def validate_host_mount(raw: str) -> str:
                 f"Refusing to mount system location: {resolved}. "
                 "Choose a dedicated folder to share with the container."
             )
+    # The home directory itself is never shareable, however it is spelled.
+    # (`/home` is exact-match-only in _FORBIDDEN_ROOTS, so `~`, `~/` and
+    # `~/.gnupg/..` would all slip past the checks above.)
+    _reject_home_itself(resolved)
     _reject_sensitive(resolved)
 
     if not os.path.isdir(resolved):
