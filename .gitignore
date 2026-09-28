@@ -58,6 +58,8 @@ tmp/
 # Markdown (keep only README)
 *.md
 !README.md
+# Documentation that is part of the shipped image/scripts
+!scripts/docker/HOST-SPOOFING.md
 # Runtime data — per-user, must never be committed
 /profiles.json
 /proxies.json

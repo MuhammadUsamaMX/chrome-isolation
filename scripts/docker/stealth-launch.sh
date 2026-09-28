@@ -54,6 +54,12 @@ fi
 # navigator.hardwareConcurrency reports the spoofed count.
 ACTUAL_CORES=$(nproc)
 SPOOF_CORES=$(( CHROME_CPU_CORES < ACTUAL_CORES ? CHROME_CPU_CORES : ACTUAL_CORES ))
+# Guard against a degenerate or missing value: taskset with a malformed CPU
+# list is fatal and would take the whole profile down. Never launch with 0.
+if ! [[ "$SPOOF_CORES" =~ ^[0-9]+$ ]] || (( SPOOF_CORES < 1 )); then
+    echo "stealth-launch: bogus CHROME_CPU_CORES='${CHROME_CPU_CORES}', using 1" >&2
+    SPOOF_CORES=1
+fi
 
 FLAGS=(
     # Wayland native rendering — no X11
@@ -88,6 +94,13 @@ FLAGS=(
 # so Chromium (and any helper like speech-dispatcher) can see them.
 export PULSE_SERVER="${PULSE_SERVER:-unix:/home/chrome/.runtime/pulse/native}"
 export PIPEWIRE_REMOTE="${PIPEWIRE_REMOTE:-/home/chrome/.runtime/pipewire-0}"
+
+# Report the spoofed core count in the container log so a mismatch between the
+# machine signature and what the browser will actually see is visible.
+echo "stealth-launch[$PROFILE_NAME]: ${CHROME_CPU_MODEL:-?}" \
+     "($CHROME_CPU_PHYSICAL_CORES physical / $CHROME_CPU_CORES logical cores," \
+     "${CHROME_MEM_TOTAL_GB:-?}GB, ${CHROME_DMI_SYS_VENDOR:-?} ${CHROME_DMI_PRODUCT_NAME:-?})" \
+     "-> effective cores $SPOOF_CORES"
 
 # Note: no --start-maximized — the window opens at the profile's spoofed size
 # so window dimensions stay consistent with the machine signature.
