@@ -9,6 +9,7 @@ import zoneinfo
 
 from config import CHROME_PROFILES_DIR
 from validator import validate_profile_name, safe_profile_path
+from host_share import validate_host_mount, host_share_dir, describe_default
 from registry import (
     list_profiles, get_profile, register_profile, update_profile as _update_registry,
     unregister_profile, resolve_profile_path,
@@ -68,16 +69,28 @@ def get_all_profiles() -> list:
                 except ValueError:
                     pass
 
+    # Batch fetch all container statuses in a single Docker API call (O(1) HTTP requests)
+    container_statuses = _docker.all_container_statuses()
+
     profiles = []
     for p in list_profiles():
+        configured_host_mount = p.get('host_mount', '')
         profiles.append({
             'name': p['name'],
             'path': p['path'],
-            'host_mount': p.get('host_mount', ''),
+            'host_mount': configured_host_mount,
+            # Resolved directory actually bind-mounted at /home/chrome/host.
+            # Empty host_mount -> the safe, empty, 0700 per-profile share dir;
+            # never the user's home directory. Surfaced so the UI can show the
+            # real path instead of implying the home dir is mounted.
+            'effective_host_mount': (configured_host_mount
+                                     or host_share_dir(p['name'])),
+            'host_mount_is_default': not bool(configured_host_mount.strip()),
+            'host_mount_default_hint': describe_default(p['name']),
             'proxy': p.get('proxy', ''),
             'machine': _read_machine(p['path']),
             'created_at': p.get('created_at', ''),
-            'status': _docker.container_status(p['name']),
+            'status': container_statuses.get(p['name'], 'not_found'),
             'size_mb': _docker.profile_size_mb(p['name']),
             'has_desktop_entry': desktop_entry_exists(p['name']),
         })
@@ -95,12 +108,12 @@ def create_profile(name: str, custom_path: str = '', host_mount: str = '', proxy
     if os.path.exists(path):
         raise ValueError(f"Directory already exists: {path}")
 
-    # Optional host folder mounted read-only into the container. Empty means
-    # the user's home directory is mounted instead.
-    if host_mount:
-        host_mount = os.path.realpath(os.path.expanduser(host_mount))
-        if not os.path.isdir(host_mount):
-            raise ValueError(f"Host folder not found: {host_mount}")
+    # Optional host folder mounted read-only into the container at
+    # /home/chrome/host. Empty means "safe empty per-profile share directory",
+    # NOT the user's home directory (T1 / F1 fix). An explicit value is a
+    # deliberate user choice but is still validated: no `/`, no system roots,
+    # no credential stores, no traversal or symlink escape into them.
+    host_mount = validate_host_mount(host_mount)
 
     proxy = _validate_proxy(proxy)
 
@@ -132,16 +145,15 @@ def _update_signature_timezone(path: str, timezone: str) -> None:
 def update_profile(name: str, host_mount: str = None, proxy: str = None,
                    timezone: str = None) -> dict:
     """Update a profile's read-only host mount, proxy, and/or timezone.
-    Empty string clears a field (host mount falls back to the home directory,
-    timezone falls back to the machine signature default)."""
+    Empty string clears a field (host mount falls back to the safe empty
+    per-profile share directory, timezone to the machine signature default).
+    A non-empty host mount is validated: `/` and other system roots, credential
+    stores, and traversal/symlink escapes into them are rejected.
+    See backend/host_share.py."""
     name = validate_profile_name(name)
 
     if host_mount is not None:
-        host_mount = host_mount.strip()
-        if host_mount:
-            host_mount = os.path.realpath(os.path.expanduser(host_mount))
-            if not os.path.isdir(host_mount):
-                raise ValueError(f"Host folder not found: {host_mount}")
+        host_mount = validate_host_mount(host_mount)
 
     if proxy is not None:
         proxy = _validate_proxy(proxy)

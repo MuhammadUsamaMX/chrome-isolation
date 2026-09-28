@@ -73,6 +73,10 @@ def import_profile(archive_path: str) -> dict:
         # Ensure Downloads subdir
         os.makedirs(os.path.join(dest, "Downloads"), exist_ok=True)
 
+        # T1 (F1): host_mount is left as the '' default on purpose. '' now
+        # means "safe empty per-profile share directory" (see host_share.py) —
+        # an imported archive never inherits the user's home directory, which
+        # is what the pre-fix `~` fallback used to do.
         entry = register_profile(profile_name, dest)
         return entry
 
