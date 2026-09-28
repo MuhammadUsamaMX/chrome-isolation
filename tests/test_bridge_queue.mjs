@@ -528,6 +528,164 @@ test('(j) backoff schedule: exponential and capped, per the shipped constants', 
   );
 });
 
+test('(l) a payload queued on a not-yet-writable pipe is flushed on stdin "ready"', async () => {
+  // startBridge()'s inline flushQueue is a no-op while stdin.writable is false —
+  // which is the *normal* state immediately after spawn() and the permanent
+  // state on a spawn failure. The real readiness signal is the event, so the
+  // flush has to hang off it or the payload is stranded.
+  const { q, state, last } = loadQueue();
+  state.spawnDead = true;               // every spawn hands back a dead stdin
+  q.startBridge();
+  const p = watch(q.callBackend('create_profile', { name: 'r' }));
+  const child = last();
+  assert.equal(child.stdin.writable, false, 'precondition: pipe not writable');
+  assert.equal(child.written.length, 0);
+  assert.equal(q.queuedIds().length, 1, 'precondition: the payload is queued');
+
+  // The pipe comes up. No restart, no new request: only the 'ready' event.
+  state.spawnDead = false;
+  child.stdin.writable = true;
+  child.stdin.emit('ready');
+
+  assert.equal(child.written.length, 1, 'the payload was stranded: no flush on "ready"');
+  assert.equal(child.requests[0].method, 'create_profile');
+  assert.equal(q.queuedIds().length, 0, 'the queue must drain after the flush');
+  child.respond(child.requests[0].id, { created: true });
+  const r = await p;
+  assertSettled(r, 'the request flushed on "ready"');
+  assert.equal(r.ok, true);
+});
+
+test('(m) the flush retry keeps re-arming until the pipe comes up', async () => {
+  // The window the retry exists for: the pipe is dead when the request queues,
+  // so startBridge()'s inline flush and 'spawn'/'ready' all find nothing to do,
+  // and then the pipe comes up *without* emitting 'ready'. A one-shot retry
+  // fires once, sees a dead pipe, and gives up — stranding the payload on a
+  // perfectly healthy bridge. It has to keep re-arming.
+  const { q, state, last } = loadQueue();
+  q.startBridge();
+  const first = last();
+  first.emit('spawn');
+  first.stdin.writable = false;          // the request has to queue
+  const p = watch(q.callBackend('import_profile', { dest: '/tmp/x' }));
+  assert.equal(q.queuedIds().length, 1);
+
+  // Several retry rounds elapse with the pipe still dead. The payload must
+  // still be owed — never dropped, never settled.
+  await tick(30);                         // FLUSH_RETRY_MS is compressed to 3ms
+  assert.equal(q.queuedIds().length, 1, 'the queue was dropped while the pipe was dead');
+  assert.equal(q.pendingCount(), 1, 'the pending promise was lost while queued');
+  assert.equal(first.written.length, 0, 'something was written to a dead pipe');
+
+  // Now the pipe comes up, with no event to announce it.
+  first.stdin.writable = true;
+  await tick(30);
+  assert.equal(q.queuedIds().length, 0, 'the retry gave up before the pipe came up');
+  assert.equal(first.written.length, 1, 'the payload must be written exactly once');
+
+  // And once drained, it must not keep polling or re-send.
+  await tick(40);
+  assert.equal(first.written.length, 1, 'the retry timer kept polling or re-sent');
+
+  first.respond(JSON.parse(first.written[0]).id, { ok: 1 });
+  const r = await p;
+  assertSettled(r, 'the request rescued by the flush retry');
+  assert.equal(r.ok, true);
+});
+
+test('(m2) the flush retry is bounded, not an unbounded poll', async () => {
+  // A permanently dead bridge must not cost a timer for the life of the
+  // process. The retry budget runs out, the queue is left owed, and the
+  // restart / give-up path takes ownership from there.
+  const { q, state, last, mod } = loadQueue();
+  q.startBridge();
+  const first = last();
+  first.emit('spawn');
+  first.stdin.writable = false;
+  const p = watch(q.callBackend('list_profiles'));
+  assert.equal(q.queuedIds().length, 1);
+
+  // Long enough for the whole budget to be spent many times over.
+  await tick(400);
+  assert.equal(q.queuedIds().length, 1, 'the queue must still be owed, not dropped');
+  assert.equal(q.pendingCount(), 1);
+  assert.equal(first.written.length, 0);
+
+  // A late pipe recovery is still picked up by the restart path, not lost.
+  q.startBridge();
+  const second = last();
+  second.emit('spawn');
+  await tick(10);
+  assert.equal(second.written.length, 1, 'a working bridge must pick up the owed payload');
+  second.respond(second.requests[0].id, { ok: 1 });
+  const r = await p;
+  assertSettled(r, 'the request recovered by a later bridge');
+  assert.equal(r.ok, true);
+  void mod;
+});
+
+test('(n) flushQueue on a dead pipe writes nothing and drops nothing', async () => {
+  const { q, last } = loadQueue();
+  q.startBridge();
+  const child = last();
+  child.emit('spawn');
+  child.stdin.writable = false;
+  const p = watch(q.callBackend('list_profiles'));
+  assert.equal(q.queuedIds().length, 1);
+
+  // A null child and an unwritable stdin are both no-ops, not crashes — and
+  // critically not data loss.
+  q.flushQueue(null);
+  q.flushQueue({ stdin: { writable: false, write() { throw new Error('must not write'); } } });
+  assert.equal(child.written.length, 0, 'nothing may be written to a dead pipe');
+  assert.equal(q.queuedIds().length, 1, 'a no-op flush must not drop the payload');
+
+  // A payload on a dead pipe must NOT be settled by a no-op flush: nothing has
+  // acted on it, so rejecting it would lose the user's action and resolving it
+  // would invent a result. It stays owed. (This is the one place a genuinely
+  // pending promise is correct, so it is asserted rather than raced.)
+  await tick(30);
+  assert.equal(q.queuedIds().length, 1, 'the payload left the queue with the dead pipe');
+  assert.equal(q.pendingCount(), 1, 'and lost its pending promise');
+
+  child.stdin.writable = true;
+  q.flushQueue(child);
+  assert.equal(q.queuedIds().length, 0);
+  child.respond(child.requests[0].id, { ok: 1 });
+  const r = await p;
+  assertSettled(r, 'the request flushed once the pipe recovered');
+  assert.equal(r.ok, true);
+});
+
+test('(o) main.js delegates to bridge_queue instead of re-implementing it', async () => {
+  // The whole point of extracting the module is that main.js is wired to the
+  // tested code. If this drifts, the tests pass while the shipped path rots.
+  const main = readFileSync(join(HERE, '..', 'electron', 'main.js'), 'utf8');
+  // Comments stripped, so prose about the fix is not mistaken for the fix.
+  const code = main
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .split('\n').map((l) => l.replace(/\/\/.*$/, '')).join('\n');
+  assert.match(code, /require\('\.\/bridge_queue'\)/, 'main.js must require the module');
+  assert.match(code, /createBridgeQueue\(\{/, 'main.js must build the queue');
+  for (const gone of [
+    'function failInFlightRequests',
+    'function flushQueue',
+    'function handleBridgeLoss',
+    'function startBridge',
+    'function callBackend',
+    'pendingRequests',
+    'pendingQueue',
+    'reqCounter',
+  ]) {
+    assert.ok(!code.includes(gone), `main.js must not re-implement ${gone}`);
+  }
+  // The behaviour that must survive the extraction.
+  assert.match(code, /bridge:failed/, 'the renderer must still be told on give-up');
+  assert.match(code, /onQuit: \(\) => app\.quit\(\)/);
+  assert.match(code, /response === 0 \? 'retry' : 'quit'/);
+  assert.match(code, /bridgeQueue\.dispose\(\)/, 'the quit handler must dispose the queue');
+});
+
 test('(k) dispose() clears timers and kills the child; no further spawns', async () => {
   const { q, state, last } = loadQueue();
   q.startBridge();
