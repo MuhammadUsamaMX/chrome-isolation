@@ -251,12 +251,14 @@
         </label>
         <label>Host Folder <span class="opt">(read-only, optional)</span>
           <div class="input-row">
-            <input type="text" id="inputHostMount" placeholder="Leave empty to mount your home directory"
+            <input type="text" id="inputHostMount" placeholder="Leave empty for a private, empty share folder"
                    readonly style="cursor: pointer;" autocomplete="off">
             <button type="button" class="btn btn-secondary btn-sm" id="btnBrowseCreate">Browse…</button>
             <button type="button" class="btn btn-secondary btn-sm" id="btnClearCreate" title="Clear host folder" aria-label="Clear host folder">✕</button>
           </div>
-          <small>Mounted read-only at /home/chrome/host inside the container.</small>
+          <small>Mounted read-only at <code>/home/chrome/host</code> inside the container. <strong>Your home directory is never mounted.</strong>
+          If you leave this empty, the container gets a private, empty folder just for this profile — nothing from your home is shared.
+          Pick a specific folder to share just those files.</small>
         </label>
         <label>Proxy <span class="opt">(optional)</span>
           <select id="inputProxySelect" class="modal-select">
@@ -279,16 +281,18 @@
   <div class="modal-overlay" id="modalEdit" role="dialog" aria-modal="true" aria-labelledby="editTitle" style="display:none;">
     <div class="modal">
       <h2 id="editTitle">Edit Profile</h2>
-      <p class="modal-sub">Update the read-only host folder and proxy.</p>
+      <p class="modal-sub">Update the read-only host folder and proxy. Your home directory is never mounted.</p>
       <form id="editForm">
         <label>Host Folder <span class="opt">(read-only, optional)</span>
           <div class="input-row">
-            <input type="text" id="editHostMount" placeholder="Leave empty to mount your home directory"
+            <input type="text" id="editHostMount" placeholder="Leave empty for a private, empty share folder"
                    readonly style="cursor: pointer;" autocomplete="off">
             <button type="button" class="btn btn-secondary btn-sm" id="btnBrowseEdit">Browse…</button>
             <button type="button" class="btn btn-secondary btn-sm" id="btnClearEdit" title="Clear host folder" aria-label="Clear host folder">✕</button>
           </div>
-          <small>Mounted read-only at /home/chrome/host inside the container.</small>
+          <small>Mounted read-only at <code>/home/chrome/host</code> inside the container. <strong>Your home directory is never mounted.</strong>
+          If you leave this empty, the container gets a private, empty folder just for this profile — nothing from your home is shared.
+          Pick a specific folder to share just those files.</small>
         </label>
         <label>Proxy <span class="opt">(optional)</span>
           <select id="editProxySelect" class="modal-select">

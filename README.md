@@ -30,14 +30,14 @@ Chrome that opens via this manager reads your host's fonts, icons, GTK theme, an
 - **Full profile isolation** — Docker container per profile, separate data directories
 - **Wayland-native** — runs on Wayland via `--ozone-platform=wayland`, no X11 needed
 - **Stealth mode** — each profile presents as its own machine: stable per-profile CPU core count, browser language, GPU backend (real GPU or software), timezone, user-agent, hostname, and window size
-- **Host files read-only** — your home directory (or a per-profile custom folder) is mounted read-only into each container at `/home/chrome/host`
+- **Host folder sharing is opt-in and narrow** — no host directory is mounted into a container unless *you* explicitly pick one. A folder you choose is mounted **read-only** at `/home/chrome/host`. Your home directory is **never** mounted implicitly; leaving **Host Folder** empty mounts an empty, per-profile `0700` directory instead (see [S7](#security) and finding F1)
 - **Per-profile proxy** — route a profile's traffic through a SOCKS5/HTTP proxy for a different egress IP; manage a shared proxy list in the app (sidebar → **Proxies**), pick one per profile from a dropdown, or enter a custom URL; loopback addresses are rewritten to the host automatically, WebRTC is forced through the proxy, and authenticated proxies (`socks5://user:pass@host:port`) are handled by an in-container auth wrapper
 - **Dark / Light mode** — follows host GNOME colour scheme; toggle in titlebar
-- **Host preferences inherited** — fonts, icons, GTK theme, cursor theme all mounted read-only
+- **Host preferences inherited** — a fixed, curated set of paths (system fonts/icons/themes and your `~/.local/share/fonts`, `~/.icons`, `~/.themes`, `~/.config/gtk-*`) is mounted read-only, so Chrome looks native without granting access to the rest of your home directory
 - **No localhost attack surface** — all IPC is over stdio JSON, no HTTP server
 - **Profile import / export** — safe ZIP/TAR archive with path-traversal protection
 - **GNOME integration** — `.desktop` entry, app icon, `chrome-isolation --profile <name>` CLI
-- **Hardened security** — no `--privileged`, no `SYS_ADMIN`, no `--ipc=host`; `/.dockerenv` masked
+- **Hardened security** — no `--privileged`, no `--ipc=host`; containers run with `cap_drop=ALL`, `no-new-privileges`, a `pids_limit` and a read-only root filesystem; `.desktop` entry refresh no longer goes through a shell
 
 ---
 
@@ -59,7 +59,9 @@ Python Backend (bridge.py)
   └── bridge.py                 — stdin/stdout JSON-RPC dispatcher
   └── profile_service.py        — high-level profile operations
   └── docker_manager.py         — Docker container lifecycle
+  └── host_share.py             — resolves + validates what host dir (if any) is shared
   └── registry.py               — profile path registry (JSON)
+  └── proxy_store.py            — shared proxy list
   └── archive.py                — safe import/export
   └── validator.py              — input validation (path traversal prevention)
   └── desktop_manager.py        — .desktop entry generation
@@ -75,6 +77,11 @@ Docker Container (isolated-chrome image)
   └── scripts/docker/user-agent-spoof.sh — stable UA
 ```
 
+> The container base image and the bundled Chromium version are being refreshed
+> (finding F3). Pin your expectations to the tag you actually run — check with
+> `docker images isolated-chrome` and `docker exec chrome-<name> chromium --version`
+> rather than assuming. **Provisional.**
+
 ---
 
 ## Requirements
@@ -87,6 +94,16 @@ Docker Container (isolated-chrome image)
 | Python | 3.10+ | Usually pre-installed |
 | Docker | 24+ | [docs.docker.com](https://docs.docker.com/get-docker/) |
 | `python-docker` | latest | `pip install docker` |
+
+> **Docker access is root-equivalent.** On first launch the app can offer to install
+> Docker and add your user to the `docker` group. Membership in the `docker` group is
+> equivalent to full root on this machine: anyone able to talk to the Docker socket can
+> start a container with a bind mount of `/` and take over the machine. The app now
+> warns about this before running the `usermod -aG docker` step — see finding
+> [F7](#remediation-audit--2026-09-29) below. If you do not accept that trade-off,
+> run the containers under a dedicated non-privileged user or a rootless Docker daemon.
+>
+> This warning text is **provisional** — the in-app prompt is still being finalised.
 
 ---
 
@@ -150,16 +167,28 @@ chrome-isolation
 ## Usage
 
 ### Create a profile
-Click **New Profile** in the sidebar. Give it a name (letters, numbers, dash, underscore). Optionally set a custom storage path, a **Host Folder** — a directory from your machine mounted read-only into the container at `/home/chrome/host` (leave empty to mount your home directory; use **Browse…** to pick it with the file manager) — and a **Proxy** chosen from the saved list or entered as a custom URL such as `socks5://127.0.0.1:1080` or `socks5://user:pass@proxy.example.com:1080`.
+Click **New Profile** in the sidebar. Give it a name (letters, numbers, dash, underscore). Optionally set a custom storage path, a **Host Folder** — a directory from your machine mounted read-only into the container at `/home/chrome/host` — and a **Proxy** chosen from the saved list or entered as a custom URL such as `socks5://127.0.0.1:1080` or `socks5://user:pass@proxy.example.com:1080`.
+
+**Leaving Host Folder empty mounts nothing from your home directory.** The container gets an empty per-profile directory (`~/.local/share/chrome-isolation-manager/host-shares/<profile>/`, mode `0700`) at `/home/chrome/host` instead. To share something, pick it with **Browse…**; to undo, use the **✕** button. The picker is available from the **Host Folder** field itself.
+
+> Previously an empty **Host Folder** silently mounted your entire home directory
+> read-only, which exposed SSH keys, `.gnupg`, keyring files and your other browser
+> profiles to every container. That default has been removed (finding F1).
+> This section is **provisional** until the host-share default is finalised and the
+> in-app field copy is updated to match.
 
 ### Manage proxies
 Click **Proxies** in the sidebar to add, view, and delete named proxies shared by all profiles (e.g. `tunnel-alan1` → `socks5://127.0.0.1:10080`). Profiles reference them by name, so updating a proxy in the list updates every profile using it.
 
 ### Edit a profile
-Click **Edit** on any profile card to change the read-only host folder, proxy, and machine timezone after creation. Changes apply the next time the profile is launched.
+Click **Edit** on any profile card to change the host folder, proxy, and machine timezone after creation. As with creation, an empty host folder means *no host directory is shared*. Changes apply the next time the profile is launched — the host mount is baked in at `docker run` time, so editing a running profile's host folder has no effect until it is stopped and relaunched.
 
 ### Launch Chrome
-Click **Launch** on any profile card. A Docker container starts and Chromium opens on your Wayland display. The container uses your host fonts, icons, and GTK theme (read-only), and presents the profile's own machine fingerprint (CPU cores, language, GPU backend, timezone, user-agent, hostname, window size).
+Click **Launch** on any profile card. A Docker container starts and Chromium opens on your Wayland display. The container uses your host fonts, icons, and GTK theme (read-only), and presents the profile's own machine fingerprint: CPU model and core count, DMI/board strings, total RAM, browser language, GPU backend (real GPU or software), timezone, user-agent, hostname, and window size. The spoofed values are mutually consistent — the advertised core count always matches the spoofed CPU string — and they are stable for the life of the profile.
+
+> The fingerprint is generated inside the container at launch and held for the
+> container's lifetime. Fields still being finalised: the exact RAM value and the
+> DMI string pool. **Provisional.**
 
 ### Stop Chrome
 Click **Stop** on the card.
@@ -181,16 +210,67 @@ Click the moon/sun icon in the titlebar. Preference is saved across sessions.
 
 ## Security
 
+### Design-level mitigations
+
 | Issue | Fix |
 |---|---|
 | **S1 — Path traversal in profile names** | `validator.py` — regex allowlist + `os.path.realpath` prefix check |
 | **S2 — Archive extraction traversal** | `archive.py` — member-by-member validation, temp-dir staging, `tarfile filter="data"` |
 | **S3 — Localhost HTTP attack surface** | Eliminated — no Flask, all IPC via stdio JSON bridge |
 | **S4 — Orphaned custom-path profiles** | `registry.py` — JSON registry tracks all profiles with actual paths |
-| **S5 — Container over-privilege** | No `--privileged`, no `SYS_ADMIN`; `/.dockerenv` masked; realistic `shm_size`, `ulimits`. The container entrypoint uses `--no-sandbox` because Docker's default seccomp profile blocks unprivileged user namespaces — the container is the security boundary |
+| **S5 — Container over-privilege** | No `--privileged`, no `--ipc=host`, no `SYS_ADMIN`. Containers run with `cap_drop=ALL`, `no-new-privileges:true`, a `pids_limit` and a read-only root filesystem, with only explicit `tmpfs` paths writable. The entrypoint still uses `--no-sandbox` because Docker's default seccomp profile blocks unprivileged user namespaces — the container remains the security boundary, so the flags above are what limit the blast radius of a renderer RCE |
 | **S6 — Flask dev server in production** | Eliminated — Electron replaces Flask entirely |
-| **S7 — Host files exposed to container** | Home directory (or per-profile folder) mounted **read-only** at `/home/chrome/host` — the container can read host files but never write to them |
+| **S7 — Host files exposed to container** | **Nothing is mounted unless the user asks for it.** An explicit host folder is mounted read-only at `/home/chrome/host`; an empty setting mounts an empty per-profile `0700` directory, never `$HOME`. Read-only still permits exfiltration, so the control is "don't mount it" rather than "mount it read-only". Only a fixed list of curated appearance paths (system + user fonts/icons/themes/GTK config) is inherited |
 | **S8 — Per-profile proxy** | Optional SOCKS5/HTTP proxy per profile; loopback rewritten to `host.docker.internal` (host-gateway alias), WebRTC forced through the proxy to prevent IP leaks, and `user:pass@` credentials handled by an in-container auth wrapper (Chromium ignores credentials in proxy URLs) |
+| **S9 — Shell injection in desktop-entry refresh** | `desktop_manager.py` — `update-desktop-database` is invoked via `subprocess.run([...])` with `shell=False`; profile names are additionally constrained by the S1 validator |
+
+### Remediation audit — 2026-09-29
+
+An independent pass over the running installation on 2026-09-29 raised the findings
+below. This table is the audit trail: what was wrong, what fixes it, and whether the
+fix is in the tree yet.
+
+| # | Finding | Remediation | Status |
+|---|---|---|---|
+| **F1** | `host_mount` fell back to `$HOME`, mounting the whole home directory read-only at `/home/chrome/host` for every profile — SSH keys, `.gnupg`, keyring files, other browser profiles all readable from a compromised page | Empty `host_mount` now resolves to an empty per-profile `0700` share dir; explicit mounts still honoured and validated | **Provisional** — landed in `config.py`/`docker_manager.py`; in-app copy and tests still pending |
+| **F2** | DMI, `/proc/cpuinfo` and `/proc/meminfo` leaked the real machine (`MS-7E27`, `AMD Ryzen 7 9700X`, 32 GB), and the spoofed core count contradicted the CPU string | Spoof DMI/cpuinfo/meminfo inside the container and derive `hardwareConcurrency` from the spoofed model | **Provisional** — in progress |
+| **F3** | Image was built 2026-09-13 on EOL `alpine:3.19` shipping Chromium 124 (Apr 2024) — a long, unsupported CVE tail | Rebuild on a supported Alpine base with a current Chromium | **Provisional** — rebuild in progress under a separate tag; `isolated-chrome:latest` is still the old image |
+| **F4** | `--no-sandbox` with a weak container profile: no `cap_drop`, no `no-new-privileges`, no `pids_limit`, writable rootfs | See S5 — `cap_drop=ALL`, `no-new-privileges`, `pids_limit`, read-only rootfs | **Provisional** — in progress |
+| **F5** | `/.dockerenv` was masked with a `0644` user-owned empty file instead of Docker's real `0755 root:root` — a fingerprint tell in itself | Match real Docker's ownership/mode, or drop the mask | **Provisional** — decision pending |
+| **F6** | `chrome-Fiverr-Read` and `chrome-Fiverr-Demo` were left running on untagged image `b226dbacf344`, two builds behind `isolated-chrome:latest` | Remove the stale containers so every profile runs the current image | **Provisional** — container removal pending; see the cleanup runbook below |
+| **F7** | The app installs Docker and runs `usermod -aG docker <user>` without explaining that Docker socket access is root-equivalent | Warn before the privilege-granting step | **Provisional** — in progress |
+| **F8** | The Python bridge restarted 1 s after any exit, forever, dropping in-flight request payloads and re-running `_ensure_image()` each time | Exponential backoff with a cap, plus explicit handling of lost in-flight requests | **Provisional** — in progress |
+| **F9** | Security fixes sat uncommitted in a dirty working tree, and the two stale containers still ran the pre-fix image layer | Commit the fix, clear the stale containers, rebuild | **Open** — see the cleanup runbook below |
+
+> **Note on the audit tables.** Everything tagged *Provisional* describes the
+> intended final behaviour. Parts of it are still landing; do not treat the
+> *Status* column as a claim that the fix is already live in your installation.
+> Verify against `docker inspect` before relying on it.
+
+### Cleaning up stale containers and images
+
+Two profile containers may be left over from an older image. Removing them does
+**not** touch profile data: every profile's data lives in `~/Chrome/<profile>/` on the
+host and is bind-mounted into the container, so the container's own writable layer
+holds only disposable state (and is discarded on removal anyway).
+
+Verify before removing anything:
+
+```bash
+# Which image does each container actually use?
+docker ps -a --filter 'name=chrome-' --format '{{.Names}}\t{{.Image}}\t{{.Status}}'
+
+# How many containers reference each image? "CONTAINERS" must be 0 before you prune.
+docker system df -v | sed -n '/^Images/,/^Containers/p'
+
+# Confirm the profile data is a host bind mount, not a Docker volume
+docker inspect chrome-<name> --format '{{range .Mounts}}{{.Type}} {{.Source}} -> {{.Destination}}{{"\n"}}{{end}}'
+```
+
+You want to see `bind /home/x/Chrome/<name> -> /home/chrome/.config/chromium` and
+`Local Volumes: 0`. Only then proceed — and re-run the second command *after* the
+rebuild in F3 finishes, so you are not pruning the image a live container needs.
+
 
 ---
 
@@ -209,7 +289,9 @@ chrome-isolation/
 │   ├── bridge.py              # stdio JSON-RPC
 │   ├── profile_service.py
 │   ├── docker_manager.py
+│   ├── host_share.py
 │   ├── registry.py
+│   ├── proxy_store.py
 │   ├── archive.py
 │   ├── validator.py
 │   ├── desktop_manager.py
@@ -268,6 +350,7 @@ rm ~/.local/bin/chrome-isolation
 rm ~/.local/share/applications/chrome-isolation.desktop
 rm ~/.local/share/icons/hicolor/256x256/apps/chrome-isolation.png
 rm -rf ~/Chrome                      # profile data — back it up first!
+docker ps -aq --filter 'name=chrome-' | xargs -r docker rm   # containers hold image refs
 docker rmi isolated-chrome
 # .deb:  sudo dpkg -r chrome-isolation
 # .rpm:  sudo dnf remove chrome-isolation

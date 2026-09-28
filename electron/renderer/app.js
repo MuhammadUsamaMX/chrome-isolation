@@ -45,6 +45,31 @@ function esc(s) {
     .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
+// ── Host folder display ───────────────────────────────────────────────────────
+// T1 (F1): an empty host_mount no longer means "your home directory is
+// mounted". It means the container gets a private, empty per-profile share
+// folder. Never render '~' as the host — that claim is what the old backend
+// default actually did, and it is exactly what we no longer do.
+function hostMountIsDefault(p) {
+  if (typeof p.host_mount_is_default === 'boolean') return p.host_mount_is_default;
+  return !String(p.host_mount || '').trim();
+}
+
+function hostMountLabel(p) {
+  if (hostMountIsDefault(p)) return 'None (private empty folder)';
+  return p.host_mount;
+}
+
+function hostMountTitle(p) {
+  if (hostMountIsDefault(p)) {
+    const dir = p.effective_host_mount || p.host_mount_default_hint || '';
+    return dir
+      ? `No host folder set. The container gets an empty private folder mounted read-only at /home/chrome/host:\n${dir}\nYour home directory is not mounted.`
+      : 'No host folder set. The container gets an empty private folder mounted read-only at /home/chrome/host. Your home directory is not mounted.';
+  }
+  return `Host folder mounted read-only at /home/chrome/host:\n${p.host_mount}`;
+}
+
 // ── Render profile cards ──────────────────────────────────────────────────────
 let lastProfiles = [];
 let currentFilter = 'all'; // all | running | stopped
@@ -105,7 +130,7 @@ function renderProfiles(profiles) {
       </div>
       ${chips.length ? `<div class="card-chips">${chips.map(c => `<span class="chip">${esc(c)}</span>`).join('')}</div>` : ''}
       <div class="card-meta">
-        <span>Host: ${p.host_mount ? esc(p.host_mount) : '~'}</span>
+        <span title="${esc(hostMountTitle(p))}">Host: ${esc(hostMountLabel(p))}</span>
         <span>Proxy: ${p.proxy ? esc(p.proxy) : 'None'}</span>
         ${p.created_at ? `<span>Created: ${esc(p.created_at.replace('T',' ').replace('Z',''))}</span>` : ''}
       </div>
@@ -288,6 +313,17 @@ function openEdit(profile) {
   editingName = profile.name;
   document.getElementById('editTitle').textContent = `Edit ${profile.name}`;
   document.getElementById('editHostMount').value = profile.host_mount || '';
+  // Make the empty-means-private-folder semantics explicit where the user
+  // sees the cleared field, instead of a placeholder that vanishes on focus.
+  if (hostMountIsDefault(profile)) {
+    const dir = profile.effective_host_mount || profile.host_mount_default_hint || '';
+    document.getElementById('editHostMount').title = dir
+      ? `Empty = a private, empty folder mounted read-only at /home/chrome/host.\nCurrently: ${dir}\nYour home directory is NOT mounted.`
+      : 'Empty = a private, empty folder mounted read-only at /home/chrome/host. Your home directory is NOT mounted.';
+  } else {
+    document.getElementById('editHostMount').title =
+      `Mounted read-only at /home/chrome/host:\n${profile.host_mount}`;
+  }
   document.getElementById('editTimezone').value = (profile.machine && profile.machine.timezone) || '';
 
   // Proxy: saved name -> select it; custom URL -> Custom… + fill the input
