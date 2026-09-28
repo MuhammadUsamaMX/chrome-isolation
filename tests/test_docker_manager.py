@@ -249,8 +249,11 @@ def test_start_container_hardened():
     assert kwargs['cap_drop'] == ['ALL'], kwargs
     # nothing may raise privilege via setuid/exec
     assert 'no-new-privileges' in kwargs['security_opt'], kwargs
-    # bounded fork bombs
-    assert kwargs['pids_limit'] == docker_manager.DockerManager.PIDS_LIMIT, kwargs
+    # bounded fork bombs. Pinned to the literal, NOT to
+    # `DockerManager.PIDS_LIMIT`: comparing the code to itself passes for any
+    # value at all, and -1 (unlimited) would sail through. Same reasoning as
+    # the `mem_limit == '2g'` assertion below.
+    assert kwargs['pids_limit'] == 2048, kwargs
     # bounded memory, no swap growth
     assert kwargs['mem_limit'] == kwargs['memswap_limit'] == '2g', kwargs
     # read-only rootfs

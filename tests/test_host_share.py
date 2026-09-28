@@ -216,6 +216,135 @@ def test_non_string_rejected():
     assert _raises(host_share.validate_host_mount, ['/tmp']) is not None
 
 
+# ── the home directory is NOT shareable, in any spelling (F1) ───────────────
+def test_home_directory_itself_rejected():
+    """`~`, `~/`, `$HOME` and the plain expanded path all resolve to the home
+    directory, which is exactly what F1 was about. `/home` is in
+    _FORBIDDEN_ROOTS only as an exact match, so without a dedicated check the
+    original finding could be re-armed by typing one character."""
+    for spelling in ('~', '~/', '~/.', ' ~/ '):
+        msg = _raises(host_share.validate_host_mount, spelling)
+        assert 'home directory' in msg, (spelling, msg)
+        assert 'Refusing' in msg, (spelling, msg)
+    # The fully expanded path ($HOME expanded) is the same directory and must
+    # be refused too.
+    msg = _raises(host_share.validate_host_mount,
+                  os.path.realpath(os.path.expanduser('~')))
+    assert 'home directory' in msg, msg
+    # And via the resolve_* entry point, which is what the app actually calls.
+    tmp = _with_tmp_shares()
+    try:
+        msg = _raises(host_share.resolve_host_mount, 'HomeTest', '~')
+        assert 'home directory' in msg, msg
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_home_escape_by_dotdot_rejected():
+    """`~/.gnupg/..` realpaths back to the home directory. The credential-store
+    check only looks *downward*, so this needs the home check to catch it."""
+    home_sub = os.path.join(os.path.expanduser('~'), '.gnupg')
+    if not os.path.exists(home_sub):
+        pytest_home = tempfile.mkdtemp(prefix='fake-home-')
+        try:
+            os.makedirs(os.path.join(pytest_home, '.gnupg'))
+            escape = os.path.join(pytest_home, '.gnupg', '..')
+            # Sanity: this really does resolve to the temp home.
+            assert os.path.realpath(escape) == os.path.realpath(pytest_home)
+            old_env = os.environ.get('HOME')
+            os.environ['HOME'] = pytest_home
+            try:
+                msg = _raises(host_share.validate_host_mount, escape)
+                assert 'home directory' in msg, msg
+            finally:
+                if old_env is None:
+                    os.environ.pop('HOME', None)
+                else:
+                    os.environ['HOME'] = old_env
+        finally:
+            shutil.rmtree(pytest_home, ignore_errors=True)
+    else:
+        escape = os.path.join(home_sub, '..')
+        msg = _raises(host_share.validate_host_mount, escape)
+        assert 'home directory' in msg, msg
+
+
+def test_symlink_to_home_rejected():
+    tmp = _with_tmp_shares()
+    try:
+        link = os.path.join(tmp, 'my-share')
+        os.symlink(os.path.realpath(os.path.expanduser('~')), link)
+        msg = _raises(host_share.validate_host_mount, link)
+        assert 'home directory' in msg, msg
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_home_subfolder_still_allowed():
+    """The guarantee is "not the whole home directory", not "nothing in home"."""
+    home = os.path.realpath(os.path.expanduser('~'))
+    share = os.path.join(home, 'share')
+    created = not os.path.isdir(share)
+    if created:
+        os.makedirs(share, exist_ok=True)
+    try:
+        resolved = host_share.validate_host_mount(share)
+        assert resolved == share, resolved
+        assert resolved != home
+    finally:
+        if created:
+            shutil.rmtree(share, ignore_errors=True)
+
+
+def test_resolve_home_subfolder_allowed():
+    tmp = _with_tmp_shares()
+    share = os.path.join(os.path.realpath(os.path.expanduser('~')), 'share')
+    created = not os.path.isdir(share)
+    if created:
+        os.makedirs(share, exist_ok=True)
+    try:
+        resolved = host_share.resolve_host_mount('SubHome', share)
+        assert resolved == share, resolved
+    finally:
+        if created:
+            shutil.rmtree(share, ignore_errors=True)
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_profile_service_rejects_home_mount():
+    """create_profile / update_profile must refuse '~', not just '/'."""
+    import profile_service
+    tmp = _with_tmp_shares()
+    real_profiles_dir = profile_service.CHROME_PROFILES_DIR
+    reg = __import__('registry')
+    real_registry_file, real_reg_dir = reg.REGISTRY_FILE, reg.CHROME_PROFILES_DIR
+    try:
+        reg.REGISTRY_FILE = os.path.join(tmp, 'profiles.json')
+        reg.CHROME_PROFILES_DIR = os.path.join(tmp, 'profiles')
+        os.makedirs(reg.CHROME_PROFILES_DIR, exist_ok=True)
+        profile_service.CHROME_PROFILES_DIR = os.path.join(tmp, 'profiles')
+
+        msg = _raises(profile_service.create_profile, 'homeish', '', '~')
+        assert 'home directory' in msg, msg
+
+        share = os.path.realpath(os.path.join(os.path.expanduser('~'), 'share'))
+        created = not os.path.isdir(share)
+        if created:
+            os.makedirs(share, exist_ok=True)
+        try:
+            entry = profile_service.create_profile('shareish', '', share, '')
+            assert entry['host_mount'] == share, entry
+            msg = _raises(profile_service.update_profile, 'shareish', '~')
+            assert 'home directory' in msg, msg
+        finally:
+            if created:
+                shutil.rmtree(share, ignore_errors=True)
+    finally:
+        profile_service.CHROME_PROFILES_DIR = real_profiles_dir
+        reg.REGISTRY_FILE, reg.CHROME_PROFILES_DIR = real_registry_file, real_reg_dir
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 # ── profile_service integration: create_profile / update_profile ────────────
 def test_profile_service_rejects_root_host_mount():
     """create_profile and update_profile must refuse a '/' host mount."""
