@@ -1,12 +1,19 @@
 """
 Docker manager — hardened container runtime (S5 fix).
-- No dangerous capabilities added
+- No dangerous capabilities added; *all* capabilities are dropped
+- no-new-privileges set, so nothing inside can regain privilege
+- Bounded pid/ulimit/memory footprint
+- Read-only root filesystem with an explicit tmpfs set for the paths
+  Chromium legitimately writes to
 - X11 socket mounted only when needed
 - PulseAudio / PipeWire socket mounted
 - GPU access via /dev/dri (read-only for display, rw for render)
 - Host desktop preferences injected as read-only volumes + env vars
 - --no-sandbox used inside the container (Docker's default seccomp profile blocks unprivileged user namespaces; the container itself is the security boundary)
 - profile registry used for all path lookups
+- T1 (F1): /home/chrome/host defaults to a safe, empty, per-profile share
+  directory (mode 0700) — NEVER to the user's home directory. See
+  backend/host_share.py for the full rationale.
 """
 import grp
 import hashlib
@@ -24,6 +31,7 @@ from docker.types import Ulimit
 from config import DOCKER_IMAGE_NAME, CONTAINER_PREFIX, APP_DATA_DIR
 from validator import validate_profile_name
 from registry import resolve_profile_path, register_profile, get_profile
+from host_share import ensure_host_share_dir, resolve_host_mount
 from proxy_store import resolve as _resolve_proxy
 
 # Stable hostname pools — deterministic per profile via MD5
@@ -33,6 +41,21 @@ _H_DEVICE = ['laptop','desktop','pc','thinkpad','studio','home','book','box']
 
 class DockerManager:
     _SIZE_CACHE_TTL = 30  # seconds
+
+    # ---- runtime hardening limits (F4) ------------------------------------
+    # Bounded but generous: Chromium runs a browser process, zygote, GPU
+    # process, one renderer per site instance plus utility processes, and
+    # pipewire/pulse clients. 2048 leaves a wide margin while still preventing
+    # a fork bomb from exhausting the host pid table.
+    PIDS_LIMIT = 2048
+    # ~2 GB RAM ceiling (mem_limit == memswap_limit, so no swap growth).
+    # NOTE: tmpfs pages ARE charged to the cgroup memory limit, so this budget
+    # covers /dev/shm (2g max), the small tmpfs set below, and Chromium's
+    # anonymous heap together. Measured steady state for a single browsing
+    # profile is ~200 MB anon + ~35 MB shmem, so 2 GB leaves ~10x headroom
+    # while still bounding a runaway renderer. Raise this if heavy video
+    # pages start hitting the cgroup OOM killer.
+    MEM_LIMIT = '2g'
 
     def __init__(self):
         self.client = docker.from_env()
@@ -80,6 +103,25 @@ class DockerManager:
         except docker.errors.NotFound:
             return "not_found"
 
+    def all_container_statuses(self) -> dict:
+        """Return a mapping of profile_name -> status for all profile containers in a single Docker API call.
+
+        Optimizes get_all_profiles by reducing Docker daemon socket roundtrips from O(N) to O(1).
+        """
+        try:
+            containers = self.client.containers.list(all=True)
+            prefix = CONTAINER_PREFIX
+            prefix_len = len(prefix)
+            statuses = {}
+            for c in containers:
+                cname = (getattr(c, 'name', '') or '').lstrip('/')
+                if cname.startswith(prefix):
+                    prof_name = cname[prefix_len:]
+                    statuses[prof_name] = c.status
+            return statuses
+        except Exception:
+            return {}
+
     # ---------------------------------------------------------------- profile size
     def profile_size_mb(self, profile_name: str) -> float:
         profile_name = validate_profile_name(profile_name)
@@ -122,7 +164,8 @@ class DockerManager:
         except docker.errors.NotFound:
             pass
 
-        volumes = self._build_volumes(profile_dir, downloads_dir, host_mount)
+        volumes = self._build_volumes(profile_dir, downloads_dir, host_mount,
+                                      profile_name=profile_name)
         env = self._build_env(profile_name)
         device_gids = self._device_group_ids()
         hostname = self._profile_hostname(profile_name)
@@ -163,6 +206,13 @@ class DockerManager:
                 ]
             extra_hosts = {'host.docker.internal': 'host-gateway'}
 
+        # Networking is deliberately left at Docker's default bridge. The
+        # container needs outbound internet (DNS, TLS, WebSocket) to browse at
+        # all, and the default bridge gives outbound NAT without exposing any
+        # host port and without host networking. NOTE: do NOT "harden" this to
+        # network_mode='none' — that removes all connectivity and breaks
+        # browsing entirely. It would also break the per-profile proxy path,
+        # which reaches the host proxy via the host-gateway alias.
         run_kwargs = dict(
             image=DOCKER_IMAGE_NAME,
             name=cname,
@@ -170,13 +220,39 @@ class DockerManager:
             hostname=hostname,
             # 2 GB shared memory (Docker default 64 MB is a VM/container tell)
             shm_size='2g',
-            # Realistic open-file limit (default 1024 is another container tell)
-            ulimits=[Ulimit(name='nofile', soft=65536, hard=65536)],
+            # Realistic open-file limit (default 1024 is another container tell).
+            # nproc bounds thread/process creation for a single uid inside the
+            # container, complementing pids_limit at the cgroup level.
+            ulimits=[
+                Ulimit(name='nofile', soft=65536, hard=65536),
+                Ulimit(name='nproc', soft=4096, hard=4096),
+            ],
             detach=True,
             volumes=volumes,
             environment=env,
             group_add=device_gids,
+            # ---- runtime hardening (F4) --------------------------------
             # No privileged, no SYS_ADMIN, no ipc=host.
+            # Drop *every* capability: the container runs as uid 1000 (chrome),
+            # which needs none of them. /dev/dri is accessed via the video/render
+            # group in group_add, not via CAP_SYS_ADMIN / device mknod.
+            cap_drop=['ALL'],
+            # no-new-privileges: blocks setuid binaries and prevents any exec
+            # from raising privilege, so a Chromium RCE cannot escalate even
+            # if something inside the image were setuid-root.
+            security_opt=['no-new-privileges'],
+            # Generous for Chromium (browser + GPU + renderers + zygote + pipewire
+            # clients) but bounded, so a fork bomb cannot exhaust the host.
+            pids_limit=self.PIDS_LIMIT,
+            # Read-only root filesystem. Every writable path the browser needs is
+            # an explicit tmpfs (see _build_tmpfs) or an existing rw bind mount
+            # (profile dir, Downloads, mounted sockets).
+            read_only=True,
+            tmpfs=self._build_tmpfs(),
+            # ~2 GB RAM cap, documented on MEM_LIMIT. memswap == mem_limit
+            # means the container cannot grow swap usage.
+            mem_limit=self.MEM_LIMIT,
+            memswap_limit=self.MEM_LIMIT,
             # GPU backend flags are chosen per-profile in stealth-launch.sh.
             command=command,
         )
@@ -194,6 +270,42 @@ class DockerManager:
 
         container = self.client.containers.run(**run_kwargs)
         return {"status": "started", "container_id": container.id}
+
+    # ------------------------------------------------------------ tmpfs set
+    # Paths Chromium (and its helpers) legitimately write to, given a read-only
+    # root filesystem. Everything NOT listed here must come from a rw bind
+    # mount — profile dir, Downloads, and the individual host sockets — which
+    # the read-only rootfs does not affect because mounts are applied on top.
+    #
+    # Sized small on purpose: these are scratch space, not a place to stage
+    # data. A renderer compromise is limited to a few hundred MB of tmpfs that
+    # vanishes with the container.
+    _TMPFS = {
+        # Chromium's own scratch (Crashpad, mojo shared memory staging, temp
+        # profile locks, Mesa/llvmpipe shader cache in some paths).
+        '/tmp':                 'rw,nosuid,nodev,noexec,size=64m,mode=1777',
+        # Alpine's /run holds runtime state: pipewire/pulse lookups, nscd-style
+        # caches, dbus socket paths. Small and volatile. mode=1777 matches what
+        # a normal container's /run looks like to anything that wants to drop a
+        # lock or socket there.
+        '/run':                 'rw,nosuid,nodev,noexec,size=8m,mode=1777',
+        '/var/tmp':             'rw,nosuid,nodev,noexec,size=16m,mode=1777',
+        # XDG_CACHE_HOME: fontconfig cache, mesa/gallium shader cache,
+        # Chromium's disk_cache. Must be owned by uid 1000 (chrome).
+        '/home/chrome/.cache':  'rw,nosuid,nodev,noexec,size=256m,uid=1000,gid=1000,mode=700',
+        # XDG_DATA_HOME / XDG_STATE_HOME: fontconfig data, desktop entries,
+        # Chromium's Local State-adjacent state that is not in the profile dir.
+        '/home/chrome/.local':  'rw,nosuid,nodev,noexec,size=32m,uid=1000,gid=1000,mode=755',
+        # XDG_RUNTIME_DIR. The Wayland/PipeWire/Pulse *sockets* are individual
+        # rw bind mounts layered on top of this tmpfs (Docker mounts parents
+        # first), so the directory itself stays writable for lock files while
+        # only those specific host sockets are reachable.
+        '/home/chrome/.runtime': 'rw,nosuid,nodev,noexec,size=8m,uid=1000,gid=1000,mode=700',
+    }
+
+    @classmethod
+    def _build_tmpfs(cls) -> dict:
+        return dict(cls._TMPFS)
 
     # ----------------------------------------------------------------- stop
     def stop_container(self, profile_name: str) -> dict:
@@ -236,16 +348,27 @@ class DockerManager:
 
     def _profile_host_mount(self, profile_name: str) -> str:
         """
-        Per-profile host folder mounted read-only into the container.
-        Falls back to the user's home directory when the profile has no
-        custom host_mount configured.
+        Per-profile host folder mounted READ-ONLY at /home/chrome/host.
+
+        SECURITY (T1 / F1): an empty `host_mount` NO LONGER falls back to the
+        user's home directory. That default handed every container the whole
+        home dir (SSH keys, .gnupg, KWallet, other browser profiles);
+        read-only stops writes but not exfiltration.
+
+        `host_mount == ""` now means "use a safe, empty, per-profile share
+        directory" at <APP_DATA_DIR>/host-shares/<profile_name>/ (mode 0700,
+        created on demand). Existing profiles that already store "" become safe
+        without any registry rewrite.
+
+        An explicit `host_mount` is still honoured — that is a deliberate user
+        choice — and is validated by host_share.validate_host_mount().
         """
         entry = get_profile(profile_name)
-        if entry and entry.get('host_mount'):
-            return os.path.realpath(os.path.expanduser(entry['host_mount']))
-        return os.path.expanduser('~')
+        configured = (entry or {}).get('host_mount', '')
+        return resolve_host_mount(profile_name, configured)
 
-    def _build_volumes(self, profile_dir: str, downloads_dir: str, host_mount: str = '') -> dict:
+    def _build_volumes(self, profile_dir: str, downloads_dir: str,
+                       host_mount: str = '', profile_name: str = '') -> dict:
         uid = os.getuid()
         xdg_runtime = f'/run/user/{uid}'
         wayland_display = os.environ.get('WAYLAND_DISPLAY', 'wayland-0')
@@ -257,11 +380,19 @@ class DockerManager:
             downloads_dir: {'bind': '/home/chrome/Downloads',        'mode': 'rw'},
         }
 
-        # Host folder (read-only) — the user's home by default, or a
-        # per-profile custom directory. Mounted at /home/chrome/host so the
-        # browser can read host files but never write to them.
-        host_src = host_mount or os.path.expanduser('~')
-        if os.path.isdir(host_src):
+        # Host folder (read-only) at /home/chrome/host.
+        # `host_mount` is already resolved by _profile_host_mount(): either a
+        # validated user-chosen directory or the safe empty per-profile share
+        # dir. NEVER fall back to the home directory here.
+        if host_mount:
+            host_src = os.path.realpath(os.path.expanduser(host_mount))
+        elif profile_name:
+            host_src = ensure_host_share_dir(profile_name)
+        else:
+            # No profile context available — mount nothing rather than risk
+            # exposing the host's home directory.
+            host_src = ''
+        if host_src and os.path.isdir(host_src):
             volumes[host_src] = {'bind': '/home/chrome/host', 'mode': 'ro'}
 
         # Wayland / PipeWire / PulseAudio — mount only the individual sockets
@@ -302,13 +433,29 @@ class DockerManager:
             if os.path.exists(src):
                 volumes[src] = {'bind': src, 'mode': 'ro'}
 
-        # Mask /.dockerenv — Docker creates this zero-byte file at runtime;
-        # fingerprinting scripts check its existence to detect containers.
-        dockerenv_mask = os.path.join(APP_DATA_DIR, '.empty')
-        if not os.path.exists(dockerenv_mask):
-            open(dockerenv_mask, 'w').close()
-        volumes[dockerenv_mask] = {'bind': '/.dockerenv', 'mode': 'ro'}
-
+        # ---- /.dockerenv mask: REMOVED ON PURPOSE (F5 / T3) ----
+        #
+        # The container image runs as the non-root user `chrome` (UID 1000) and
+        # this code runs as the host user, so a bind-mounted mask can never
+        # reproduce Docker's real `/.dockerenv` (mode 0755, owner 0:0 --
+        # verified against docker 29.8.1). A mask created here is 0644,
+        # 1000:1000, and inside the container it stats as `644 1000:1000`
+        # -- i.e. a *non-standard* `/.dockerenv`, which is a strictly worse
+        # fingerprint tell than leaving the real file in place. The only way
+        # to get 0:0 is to run the container as UID 0 or to chown a file as
+        # root on the host; both undo the container hardening (T2) and are
+        # not worth it.
+        #
+        # Decision: do not mask. `/.dockerenv` keeps its genuine 0755 root:root
+        # metadata, so any check that merely stats the file sees exactly what
+        # a real Docker container shows. This is an honest accept-the-tell:
+        # a correct-looking file is worth more than a fake one, and the tell
+        # is in any case one of many (cgroup v2 line, Alpine os-release,
+        # uname release, /sys/class/dmi, /proc/cpuinfo) -- see T4, which
+        # addresses those properly.
+        #
+        # The unused `.empty` marker file in APP_DATA_DIR is left in place
+        # (harmless, and it is not a live container mount).
         return volumes
 
     def _build_env(self, profile_name: str) -> dict:

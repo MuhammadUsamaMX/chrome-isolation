@@ -15,6 +15,7 @@ import traceback
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'backend'))
 
 import docker_manager
+import host_share
 import registry
 
 
@@ -56,6 +57,10 @@ def _make_manager():
     registry.REGISTRY_FILE = os.path.join(tmp, 'profiles.json')
     registry.CHROME_PROFILES_DIR = os.path.join(tmp, 'profiles')
     os.makedirs(registry.CHROME_PROFILES_DIR, exist_ok=True)
+    # Redirect the per-profile host-share root so tests never touch the real
+    # ~/.local/share/chrome-isolation-manager/host-shares directory.
+    host_share.HOST_SHARES_DIR = os.path.join(tmp, 'host-shares')
+    os.makedirs(host_share.HOST_SHARES_DIR, exist_ok=True)
 
     real_from_env = docker_manager.docker.from_env
     docker_manager.docker.from_env = lambda: _FakeClient()
@@ -120,9 +125,14 @@ def test_build_volumes_socket_only():
         assert vols[profile_dir] == {'bind': '/home/chrome/.config/chromium', 'mode': 'rw'}
         assert vols[downloads_dir] == {'bind': '/home/chrome/Downloads', 'mode': 'rw'}
 
-        # Host home mounted read-only at /home/chrome/host (default)
-        assert vols[os.path.expanduser('~')] == \
-            {'bind': '/home/chrome/host', 'mode': 'ro'}, vols
+        # T1 (F1): the user's home directory must NEVER be mounted at
+        # /home/chrome/host. With neither an explicit host_mount nor a profile
+        # name, nothing is mounted there at all.
+        home = os.path.realpath(os.path.expanduser('~'))
+        assert home not in vols, f"home directory must never be mounted: {vols}"
+        assert os.path.expanduser('~') not in vols, \
+            f"home directory must never be mounted: {vols}"
+        assert [k for k, v in vols.items() if v.get('bind') == '/home/chrome/host'] == [], vols
 
         # /etc/localtime mount removed
         assert '/etc/localtime' not in vols, vols
@@ -147,6 +157,55 @@ def test_host_mount_custom_and_missing():
         missing = os.path.join(tmp, 'does-not-exist')
         vols = m._build_volumes(profile_dir, downloads_dir, missing)
         assert missing not in vols, vols
+
+        # Empty host_mount + a profile name -> the safe per-profile share dir,
+        # created 0700, and never the home directory.
+        vols = m._build_volumes(profile_dir, downloads_dir, '', profile_name='alice')
+        share = os.path.join(host_share.HOST_SHARES_DIR, 'alice')
+        assert os.path.isdir(share), share
+        assert vols[share] == {'bind': '/home/chrome/host', 'mode': 'ro'}, vols
+        assert os.stat(share).st_mode & 0o777 == 0o700, oct(os.stat(share).st_mode)
+        assert os.path.realpath(os.path.expanduser('~')) not in vols, vols
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_start_container_never_mounts_home():
+    """Regression for F1: a registered profile with host_mount "" must not
+    result in the user's home directory being bind-mounted."""
+    m, tmp = _make_manager()
+    try:
+        registry.register_profile('nohome', os.path.join(tmp, 'profiles', 'nohome'),
+                                  host_mount='')
+        result = m.start_container('nohome')
+        assert result['status'] == 'started', result
+        vols = m.client.containers.run_kwargs['volumes']
+
+        home = os.path.realpath(os.path.expanduser('~'))
+        assert home not in vols, f"home mounted: {vols}"
+        assert os.path.expanduser('~') not in vols, f"home mounted: {vols}"
+
+        host_srcs = [k for k, v in vols.items() if v.get('bind') == '/home/chrome/host']
+        assert host_srcs == [os.path.join(host_share.HOST_SHARES_DIR, 'nohome')], \
+            f"unexpected host mount: {vols}"
+        assert os.listdir(host_srcs[0]) == [], \
+            "default share dir must be empty, not a view of the home dir"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_start_container_explicit_host_mount_honoured():
+    m, tmp = _make_manager()
+    try:
+        custom = os.path.join(tmp, 'shared')
+        os.makedirs(custom, exist_ok=True)
+        with open(os.path.join(custom, 'note.txt'), 'w') as f:
+            f.write('hello')
+        registry.register_profile('shared', os.path.join(tmp, 'profiles', 'shared'),
+                                  host_mount=custom)
+        m.start_container('shared')
+        vols = m.client.containers.run_kwargs['volumes']
+        assert vols[custom] == {'bind': '/home/chrome/host', 'mode': 'ro'}, vols
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -170,6 +229,80 @@ def test_build_env():
         assert env['CHROME_PROFILE'] == 'alice', env
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _run_kwargs_for(profile='alice'):
+    m, tmp = _make_manager()
+    try:
+        m.start_container(profile)
+        return m.client.containers.run_kwargs
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_start_container_hardened():
+    """F4: the container must run with no capabilities, no-new-privileges,
+    a bounded pid/memory budget and a read-only rootfs."""
+    kwargs = _run_kwargs_for()
+
+    # No capabilities at all — the browser runs as uid 1000 and needs none.
+    assert kwargs['cap_drop'] == ['ALL'], kwargs
+    # nothing may raise privilege via setuid/exec
+    assert 'no-new-privileges' in kwargs['security_opt'], kwargs
+    # bounded fork bombs
+    assert kwargs['pids_limit'] == docker_manager.DockerManager.PIDS_LIMIT, kwargs
+    # bounded memory, no swap growth
+    assert kwargs['mem_limit'] == kwargs['memswap_limit'] == '2g', kwargs
+    # read-only rootfs
+    assert kwargs['read_only'] is True, kwargs
+    # and we never regress to privileged / host namespaces
+    assert 'privileged' not in kwargs, kwargs
+    assert kwargs.get('network_mode') in (None, 'default', 'bridge'), kwargs
+    assert 'ipc_mode' not in kwargs, kwargs
+
+
+def test_start_container_ulimits_include_nproc():
+    kwargs = _run_kwargs_for()
+    names = {u.name: (u.soft, u.hard) for u in kwargs['ulimits']}
+    assert names.get('nofile') == (65536, 65536), names
+    assert 'nproc' in names, names
+    soft, hard = names['nproc']
+    assert soft == hard and soft > 0, names
+
+
+def test_tmpfs_set_is_sufficient():
+    """Every path Chromium writes to must be tmpfs or an rw bind mount."""
+    tmpfs = docker_manager.DockerManager._build_tmpfs()
+
+    for path in ('/tmp', '/run', '/var/tmp',
+                 '/home/chrome/.cache', '/home/chrome/.local',
+                 '/home/chrome/.runtime'):
+        assert path in tmpfs, f'{path} must be tmpfs for a read-only rootfs: {tmpfs}'
+
+    # .config is NOT tmpfs — it is the rw profile bind mount, and the pulse
+    # cookie lands under it.
+    assert '/home/chrome/.config' not in tmpfs, tmpfs
+
+    # The profile dir and Downloads are rw bind mounts, so they are writable
+    # without tmpfs.
+    assert '/home/chrome/Downloads' not in tmpfs, tmpfs
+
+    # No suid/exec anywhere; the runtime dir must stay owner-only.
+    for path, opts in tmpfs.items():
+        assert 'nosuid' in opts and 'nodev' in opts, (path, opts)
+        assert 'noexec' in opts, (path, opts)
+        assert opts.startswith('rw,'), (path, opts)
+    assert 'mode=700' in tmpfs['/home/chrome/.runtime'], tmpfs
+    assert 'uid=1000' in tmpfs['/home/chrome/.cache'], tmpfs
+    # world-writable scratch, like a normal /tmp
+    assert 'mode=1777' in tmpfs['/tmp'], tmpfs
+
+
+def test_tmpfs_returns_copy():
+    a = docker_manager.DockerManager._build_tmpfs()
+    a['/tmp'] = 'rw'
+    assert docker_manager.DockerManager._build_tmpfs()['/tmp'] != 'rw', \
+        '_build_tmpfs must not hand out the class-level dict'
 
 
 def test_start_container_command():
