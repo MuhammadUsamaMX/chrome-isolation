@@ -33,6 +33,7 @@ from validator import validate_profile_name
 from registry import resolve_profile_path, register_profile, get_profile
 from host_share import ensure_host_share_dir, resolve_host_mount
 from proxy_store import resolve as _resolve_proxy
+from image_update import dockerfile_dir as _dockerfile_dir
 
 # Stable hostname pools — deterministic per profile via MD5
 _H_FIRST  = ['john','alex','sam','mike','lisa','chris','pat','lee','tom','jay','kai','max']
@@ -70,11 +71,10 @@ class DockerManager:
             self._build_image()
 
     def _build_image(self):
-        dockerfile_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        # Inside a PyInstaller onefile bundle __file__ points into the _MEIPASS
-        # temp dir; the Dockerfile lives next to the packaged bridge binary.
-        if not os.path.isfile(os.path.join(dockerfile_dir, 'Dockerfile')):
-            dockerfile_dir = os.path.dirname(sys.executable)
+        # Single source of truth for "where is the Dockerfile" — the background
+        # updater (image_update.dockerfile_dir) resolves it the same way, and
+        # the two must never drift.
+        dockerfile_dir = _dockerfile_dir()
         env = os.environ.copy()
         env['DOCKER_BUILDKIT'] = '1'
         result = subprocess.run(

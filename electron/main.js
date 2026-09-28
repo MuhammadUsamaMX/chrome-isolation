@@ -328,6 +328,27 @@ const startBridge = () => bridgeQueue.startBridge();
 const callBackend = (method, params) => bridgeQueue.callBackend(method, params);
 
 // ─────────────────────────────────────────────
+// Chromium auto-update kick-off
+//
+// Deliberately placed AFTER the window exists and NOT awaited. The bridge
+// method returns as soon as the rebuild is handed to a background thread, so
+// startup cannot be delayed by it — but firing it before the window would
+// still be wrong, because a slow bridge spawn would then delay first paint
+// for no user-visible benefit. A build is minutes of work that nobody is
+// waiting on; the UI can observe it through `image:updateStatus` whenever it
+// likes. The debounce floor and the single-flight lock mean repeated launches
+// cost one lock attempt each, not one build each.
+function kickOffImageUpdateCheck() {
+  setTimeout(() => {
+    callBackend('image_update_check', {}).catch((err) => {
+      // The kill switch and the "already in progress" answer are normal
+      // outcomes, not failures worth surfacing.
+      if (!app.isPackaged) console.error('image update check:', err);
+    });
+  }, 2000);
+}
+
+// ─────────────────────────────────────────────
 // IPC handlers  (S3: no HTTP surface)
 // ─────────────────────────────────────────────
 function registerIpc() {
@@ -385,6 +406,16 @@ function registerIpc() {
   ipcMain.handle('profiles:status', (_, name) =>
     callBackend('profile_status', { name })
   );
+
+  // Chromium auto-update. The bridge method returns as soon as it has handed
+  // the rebuild to a background thread, so this is not a blocking call — the
+  // worst case is a fast refusal (kill switch set, a build already running, or
+  // the debounce floor not yet elapsed). It is also fired detached, so a
+  // bridge that is not up yet just queues harmlessly behind the normal queue.
+  ipcMain.handle('image:checkUpdate', () => callBackend('image_update_check', {}));
+
+  // Status poll for the UI. Reads a small in-memory dict; never blocks.
+  ipcMain.handle('image:updateStatus', () => callBackend('image_update_status', {}));
 
   // Export — open native save dialog, then call backend
   ipcMain.handle('profiles:export', async (_, name) => {
@@ -485,6 +516,9 @@ app.whenReady().then(async () => {
   }
 
   handleProfileArg();
+
+  // AFTER the window, and not awaited — see kickOffImageUpdateCheck().
+  kickOffImageUpdateCheck();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

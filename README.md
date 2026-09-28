@@ -224,6 +224,66 @@ Click the moon/sun icon in the titlebar. Preference is saved across sessions.
 | **S8 — Per-profile proxy** | Optional SOCKS5/HTTP proxy per profile; loopback rewritten to `host.docker.internal` (host-gateway alias), WebRTC forced through the proxy to prevent IP leaks, and `user:pass@` credentials handled by an in-container auth wrapper (Chromium ignores credentials in proxy URLs) |
 | **S9 — Shell injection in desktop-entry refresh** | `desktop_manager.py` — `update-desktop-database` is invoked via `subprocess.run([...])` with `shell=False`; profile names are additionally constrained by the S1 validator |
 
+### Chromium auto-update
+
+Chromium is not installed on the host — it lives inside the `isolated-chrome`
+Docker image, so "updating Chromium" means rebuilding that image from the
+`Dockerfile`. A cached build is ~31 s; a cold build is minutes and pulls
+~300 MB. `image_update.py` therefore treats a rebuild as a background job, not
+a startup step.
+
+**It never blocks.** The bridge method hands the rebuild to a daemon thread and
+returns immediately. No IPC request, Electron call or UI action waits on it.
+
+**It never risks your working image.** The build targets a staging tag
+(`isolated-chrome:staging-<pid>-<ts>`). The staging image is then verified —
+Chromium runs as the `chrome` user, `versions.env` is present, and the
+`LD_PRELOAD` shim actually loads — and only a fully verified image is promoted
+onto `isolated-chrome:latest` with a single `docker tag`. On any failure the
+staging tag is deleted and `:latest` is left byte-for-byte untouched. This
+matters because `_ensure_image()` only rebuilds on `ImageNotFound`: a broken
+image left on `:latest` would be launched forever with no recovery path.
+
+Also: builds are serialised by an `flock` on
+`~/.local/share/chrome-isolation-manager/image-update.lock` (cross-process —
+Electron restarts the bridge on crash, so an in-process flag is not enough);
+a build is deferred while any `chrome-*` container is running; and attempts
+are debounced (6 h normally, 24 h after a failure) so a persistently failing
+update cannot become a retry loop.
+
+| Variable | Effect |
+|---|---|
+| `CHROME_ISOLATION_NO_AUTO_UPDATE=1` | **Kill switch.** Disables the whole path, including a forced rebuild. Nothing is built, no Docker command runs |
+| `CHROME_ISOLATION_FORCE_IMAGE_UPDATE=1` | Documented manual opt-in: rebuild at the next app start even when the version check says there is no update. Still respects the lock and the running-container deferral — those protect the install |
+| `CHROME_ISOLATION_VERSION_DETECTOR=module:callable` | Registers the version-detection module (see below) |
+
+`image_update_status` returns the current `state`
+(`idle`/`checking`/`building`/`verifying`/`ready`/`failed`/`up_to_date`/
+`deferred`/`disabled`/`debounced`/`interrupted`) with `started_at`,
+`finished_at`, `error`, `current_version` and `latest_version`.
+
+**The version-detection seam.** `image_update.py` does not know how to ask
+"is a newer Chromium available?" — that belongs to a separate module, and
+guessing its API would be worse than declaring a contract. It needs one
+callable:
+
+```python
+def detector(image_name: str) -> dict:
+    return {"current": "152.0.7977.82", "latest": "153.0.2.1"}
+```
+
+`latest` of `None`, a raised exception, or a malformed return all mean
+"cannot tell". **The default is fail-closed**: with no detector registered,
+nothing is rebuilt. "Cannot tell" must never be read as "yes, rebuild" —
+a false positive costs minutes and 1.31 GB of I/O on every app start, and
+gets it wrong every single time. The *current* version needs no detector and is
+read straight from the image's `versions.env`, which the `Dockerfile` writes at
+build time so reporting cannot drift from reality.
+
+> Progress is written to **stderr** only. `stdout` is the newline-delimited
+> JSON IPC protocol; one stray `print()` from the background thread corrupts
+> the stream for the renderer.
+
 ### Remediation audit — 2026-09-29
 
 An independent pass over the running installation on 2026-09-29 raised the findings
@@ -289,6 +349,7 @@ chrome-isolation/
 │   ├── bridge.py              # stdio JSON-RPC
 │   ├── profile_service.py
 │   ├── docker_manager.py
+│   ├── image_update.py         # Background Chromium auto-update
 │   ├── host_share.py
 │   ├── registry.py
 │   ├── proxy_store.py
