@@ -13,9 +13,26 @@ ARG ALPINE_VERSION=3.24
 FROM alpine:${ALPINE_VERSION} AS hwspoof-build
 RUN apk add --no-cache build-base
 COPY scripts/docker/libhwspoof.c /src/libhwspoof.c
-RUN cc -O2 -fPIC -shared -o /libhwspoof.so /src/libhwspoof.c \
+RUN cc -O2 -Wall -fPIC -shared -o /libhwspoof.so /src/libhwspoof.c \
     && strip /libhwspoof.so \
     && test -s /libhwspoof.so
+# The shim and the script that loads it are built from the same tree in the
+# same build, so they cannot drift. Prove it rather than assume it: musl gives
+# no failure signal when an LD_PRELOAD cannot be loaded, and a shim that loads
+# but whose hooks do not resolve is worse than no shim at all. Run the real
+# activation check here, so an image that would fail at container start fails at
+# BUILD time instead.
+RUN set -eu; \
+    probe="$(mktemp)"; \
+    LD_PRELOAD=/libhwspoof.so CHROME_SPOOF_PROBE="$probe" /bin/true >/dev/null 2>&1 || true; \
+    got="$(cat "$probe" 2>/dev/null || true)"; \
+    if [ "$got" != "loaded" ]; then \
+        echo "FATAL: built shim did not self-test (probe said '$got')" >&2; \
+        rm -f "$probe"; \
+        exit 1; \
+    fi; \
+    rm -f "$probe"; \
+    echo "Shim self-test OK: /libhwspoof.so loads and its hooks resolve"
 
 FROM alpine:${ALPINE_VERSION}
 

@@ -21,8 +21,20 @@
  *     3. Web content cannot read these paths at all, so the realistic
  *        exposure is to *native* code running inside the container.
  *
- * Nothing here may ever be fatal: every hook falls through to the real libc
- * function if the faked replacement is missing or unusable.
+ * Nothing here may ever be fatal, and "never fatal" must not be implemented by
+ * failing closed. An earlier revision returned -1/NULL from any hook whose
+ * dlsym(RTLD_NEXT, ...) failed; on musl that made open() fail for every path,
+ * so the dynamic loader could not map the browser and Chromium never started
+ * (measured: `/bin/sh: can't open '/usr/bin/chromium-browser'`, exit 2). Every
+ * hook now falls back to issuing the underlying syscall itself, which is what
+ * libc was doing anyway, so a shim that cannot resolve degrades to "no
+ * spoofing" rather than to "nothing works".
+ *
+ * Built and verified against musl (Alpine 3.24). musl's dlsym(RTLD_NEXT, ...)
+ * resolves correctly here — that hypothesis was tested and is false. musl does
+ * NOT export open64/openat64/fopen64 at all (and the linker refuses to resolve
+ * them), so those three hooks are unreachable on this platform; they are kept
+ * for glibc builds and fall through to the raw syscall if ever called.
  */
 #define _GNU_SOURCE
 #include <dlfcn.h>
@@ -60,25 +72,63 @@ struct hwspoof_sockaddr_ll {
 };
 
 /*
- * Load probe. musl's loader IGNORES an LD_PRELOAD entry that cannot be loaded
- * and still execs the program with exit status 0, so "the process started" is
- * not evidence that the shim is active. hardware-spoof.sh sets
- * CHROME_SPOOF_PROBE to a path and checks the file afterwards. Raw syscalls
- * are used so the probe cannot recurse through our own open() hook.
+ * Set to 1 while every libc pointer resolved, and cleared to 0 by the load
+ * probe the moment any dlsym(RTLD_NEXT, ...) fails. hardware-spoof.sh reads the
+ * constructor's probe file to decide whether to export LD_PRELOAD, so this is
+ * the difference between "the shim loaded" and "the shim actually works".
+ * Declared here because the constructor below is the first thing that writes it.
+ */
+int hwspoof_hooks_usable = 1;
+
+/*
+ * Load probe.
+ *
+ * musl's loader IGNORES an LD_PRELOAD entry that cannot be loaded and still
+ * execs the program with exit status 0, so "the process started" is not
+ * evidence that the shim is active. hardware-spoof.sh sets CHROME_SPOOF_PROBE
+ * to a path and checks the file afterwards. Raw syscalls are used so the probe
+ * cannot recurse through our own open() hook.
+ *
+ * Crucially this writes "loaded" only if the hooks are genuinely usable. An
+ * earlier revision wrote "loaded" unconditionally, which meant a shim whose
+ * dlsym(RTLD_NEXT) calls all failed was accepted by the activation check —
+ * and such a shim makes every open() in the process fail, so the browser could
+ * not be exec'd at all. A shim that reports itself broken is safe; one that
+ * lies about being healthy is not. The status word is written so the script can
+ * distinguish the two.
  */
 __attribute__((constructor))
 static void hwspoof_probe(void)
 {
     const char *p = getenv("CHROME_SPOOF_PROBE");
     long fd;
+    const char *msg;
+    int len;
+
+    /* Prove the two hooks that must work for the shim to be worth loading at
+     * all: if open() cannot be resolved the process cannot even start, and if
+     * uname() cannot be resolved there is nothing to spoof. Resolve both here
+     * so hwspoof_hooks_usable reflects reality before any caller runs. */
+    if (dlsym(RTLD_NEXT, "open") == NULL || dlsym(RTLD_NEXT, "uname") == NULL)
+        hwspoof_hooks_usable = 0;
 
     if (!p || !*p)
         return;
+
+    if (hwspoof_hooks_usable) {
+        msg = "loaded\n";
+        len  = 7;
+    } else {
+        /* Distinct marker: the script must treat this as "not usable" and leave
+         * LD_PRELOAD unset, so the browser runs uninstrumented. */
+        msg = "unusable\n";
+        len  = 9;
+    }
     fd = syscall(SYS_openat, AT_FDCWD, p,
                  O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
     if (fd < 0)
         return;
-    syscall(SYS_write, fd, "loaded\n", 7);
+    syscall(SYS_write, fd, msg, len);
     syscall(SYS_close, fd);
 }
 
@@ -132,14 +182,39 @@ static int translate(const char *path, char *out, size_t outsz)
     return 0;
 }
 
-/* Resolve the real libc symbol; `goto unresolved` on failure so every hook
- * fails closed (no crash) and open to the caller. */
+/*
+ * Symbol resolution.
+ *
+ * The original version of this macro jumped to an `unresolved:` label that did
+ * `return -1;` / `return NULL;` when dlsym(RTLD_NEXT, ...) came back NULL.
+ * That is NOT a safe failure mode, and it was demonstrably not one. A shim that
+ * loads but cannot resolve its libc pointers makes every hooked function fail.
+ * Measured on Alpine 3.24 / musl, a preload whose hooks all resolved to NULL
+ * produced:
+ *
+ *     cat: can't open '/etc/hostname'
+ *     /bin/sh: can't open '/usr/bin/chromium-browser'
+ *
+ * The browser could not even be exec'd, because the dynamic loader's own open()
+ * calls were being answered with -1. The browser did not start. A "fail closed"
+ * that prevents the browser from launching is strictly worse than no shim at
+ * all, so the fallback must preserve the REAL behaviour instead.
+ *
+ * Each hook below therefore falls back to issuing the underlying syscall
+ * directly, which is precisely what libc did before we interposed on it. That
+ * keeps a partially-resolving shim harmless. `hwspoof_hooks_usable` is cleared
+ * on any resolution failure so the activation check in hardware-spoof.sh can
+ * tell "loaded" apart from "actually functional" — the constructor probe alone
+ * cannot make that distinction.
+ */
 #define RESOLVE(ret, name, args)                       \
     static ret (*real_##name) args;                    \
     if (!real_##name)                                  \
         real_##name = dlsym(RTLD_NEXT, #name);         \
-    if (!real_##name)                                  \
-        goto unresolved;
+    if (!real_##name) {                                \
+        hwspoof_hooks_usable = 0;                      \
+        goto unresolved;                               \
+    }
 
 int open(const char *path, int flags, ...)
 {
@@ -159,7 +234,9 @@ int open(const char *path, int flags, ...)
     return real_open(path, flags, mode);
 
 unresolved:
-    return -1;
+    /* Not a failure: do what libc would have done. Never return a bare -1
+     * here — the loader calls open() to map every object it loads. */
+    return (int)syscall(SYS_openat, AT_FDCWD, path, flags, mode);
 }
 
 int open64(const char *path, int flags, ...)
@@ -180,7 +257,7 @@ int open64(const char *path, int flags, ...)
     return real_open64(path, flags, mode);
 
 unresolved:
-    return -1;
+    return (int)syscall(SYS_openat, AT_FDCWD, path, flags, mode);
 }
 
 static int openat_common(int dirfd, const char *path, int flags, mode_t mode,
@@ -193,20 +270,25 @@ static int openat_common(int dirfd, const char *path, int flags, mode_t mode,
 
     if (is64) {
         static int (*real_openat64)(int, const char *, int, ...);
-        if (!real_openat64)
+        if (!real_openat64) {
             real_openat64 = dlsym(RTLD_NEXT, "openat64");
+            if (!real_openat64)
+                hwspoof_hooks_usable = 0;
+        }
         if (real_openat64)
             return real_openat64(dirfd, path, flags, mode);
-        return -1;
-    }
-    {
+    } else {
         static int (*real_openat)(int, const char *, int, ...);
-        if (!real_openat)
+        if (!real_openat) {
             real_openat = dlsym(RTLD_NEXT, "openat");
+            if (!real_openat)
+                hwspoof_hooks_usable = 0;
+        }
         if (real_openat)
             return real_openat(dirfd, path, flags, mode);
     }
-    return -1;
+    /* musl exports neither openat64 nor a usable fallback symbol; go direct. */
+    return (int)syscall(SYS_openat, dirfd, path, flags, mode);
 }
 
 int openat(int dirfd, const char *path, int flags, ...)
@@ -224,7 +306,7 @@ int openat(int dirfd, const char *path, int flags, ...)
     return openat_common(dirfd, path, flags, mode, 0);
 
 unresolved:
-    return -1;
+    return (int)syscall(SYS_openat, dirfd, path, flags, mode);
 }
 
 int openat64(int dirfd, const char *path, int flags, ...)
@@ -242,7 +324,7 @@ int openat64(int dirfd, const char *path, int flags, ...)
     return openat_common(dirfd, path, flags, mode, 1);
 
 unresolved:
-    return -1;
+    return (int)syscall(SYS_openat, dirfd, path, flags, mode);
 }
 
 FILE *fopen(const char *path, const char *mode)
@@ -256,7 +338,14 @@ FILE *fopen(const char *path, const char *mode)
     return real_fopen(path, mode);
 
 unresolved:
-    return NULL;
+    /* Open the fd ourselves and wrap it, so a failed resolution degrades to
+     * normal libc behaviour instead of "this file can never be opened". */
+    {
+        int fd = (int)syscall(SYS_openat, AT_FDCWD, path, O_RDONLY);
+        if (fd < 0)
+            return NULL;
+        return fdopen(fd, mode);
+    }
 }
 
 FILE *fopen64(const char *path, const char *mode)
@@ -270,7 +359,12 @@ FILE *fopen64(const char *path, const char *mode)
     return real_fopen64(path, mode);
 
 unresolved:
-    return NULL;
+    {
+        int fd = (int)syscall(SYS_openat, AT_FDCWD, path, O_RDONLY);
+        if (fd < 0)
+            return NULL;
+        return fdopen(fd, mode);
+    }
 }
 
 /* ---------------------------------------------------------------- sysinfo */
@@ -306,7 +400,8 @@ int sysinfo(struct sysinfo *info)
     return 0;
 
 unresolved:
-    return -1;
+    /* No spoofing, but the caller still gets its real memory figures. */
+    return (int)syscall(SYS_sysinfo, info);
 }
 
 /* ------------------------------------------------------------------ uname */
@@ -331,7 +426,9 @@ int uname(struct utsname *buf)
     return 0;
 
 unresolved:
-    return -1;
+    /* No spoofing, but a working uname() is far better than a failed one:
+     * callers (coreutils, busybox) print garbage on a short/failed return. */
+    return (int)syscall(SYS_uname, buf);
 }
 
 /* -------------------------------------------------------------- getifaddrs */
@@ -368,14 +465,21 @@ int getifaddrs(struct ifaddrs **ifap)
     return 0;
 
 unresolved:
+    /* getifaddrs has no raw-syscall equivalent — it builds a malloc'd list
+     * inside libc — so there is nothing to fall back to. Reporting failure is
+     * the honest answer, and it is off every crash path: the MAC is a
+     * fingerprint nicety, not something the browser cannot start without. */
     return -1;
 }
 
 void freeifaddrs(struct ifaddrs *ifa)
 {
     static void (*real_freeifaddrs)(struct ifaddrs *);
-    if (!real_freeifaddrs)
+    if (!real_freeifaddrs) {
         real_freeifaddrs = dlsym(RTLD_NEXT, "freeifaddrs");
+        if (!real_freeifaddrs)
+            hwspoof_hooks_usable = 0;
+    }
     if (real_freeifaddrs)
         real_freeifaddrs(ifa);
 }

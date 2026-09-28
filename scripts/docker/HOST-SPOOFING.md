@@ -29,6 +29,23 @@ profile keeps its identity.
 | MAC address | **No** | LD_PRELOAD shim (`getifaddrs()`) | **PARTIAL** |
 | hostname | n/a | **not ours** — see `docker_manager._profile_hostname()` | out of scope |
 
+"PARTIAL" is the important word in every row above, and it means two different
+things that are easy to blur together:
+
+* The shim **does work** on this base. It was verified empirically on Alpine
+  3.24 / musl, not assumed: inside the container `uname -r`,
+  `/proc/meminfo`, `/proc/cpuinfo` and `/sys/class/dmi/id/*` all return the
+  profile's fake values while the host returns its own. See
+  "Verifying it actually works" below.
+* It is still only a **partial** mitigation, because it intercepts libc calls.
+  Chromium's own `base::` filesystem helpers issue raw syscalls, so Chromium's
+  internal reads of these files are **not** masked. Nothing here claims the
+  browser process itself is clean.
+
+If you take one line away: the shim makes the container *look* like the fake
+machine to ordinary libc-based tooling. It does not, and cannot, make it
+impossible to discover the real host.
+
 ### Why the files themselves cannot be replaced
 
 Measured inside the shipped image, as user `chrome` (uid 1000), not privileged:
@@ -86,6 +103,49 @@ Its limits, stated plainly:
    more RAM than the host has), so it cannot be used to make the container look
    more capable than it is.
 
+### musl specifics (measured, not assumed)
+
+An earlier worry was that musl's `dlsym(RTLD_NEXT, ...)` might not walk the
+symbol chain the way glibc's does. **That is false, and it was tested rather
+than assumed** — on this base `dlsym(RTLD_NEXT, "open")` and friends resolve
+correctly and the shim works. Two real musl facts did turn up:
+
+* musl does **not export `open64`, `openat64` or `fopen64` at all**, and the
+  linker refuses to resolve them. Those three hooks are therefore unreachable on
+  this platform. They are kept for glibc builds and fall through to the raw
+  syscall if anything ever does call them.
+* musl silently ignores an `LD_PRELOAD` entry it cannot load and still execs
+  the program with status 0.
+
+## Verifying it actually works
+
+Because musl gives no failure signal, "the shim is present" and "the shim is
+doing something" are different claims and are checked separately:
+
+* **The constructor probe** proves the loader accepted the library. It writes a
+  marker file, and only writes `loaded` if `open` and `uname` actually resolved
+  — otherwise it writes `unusable`.
+* **`hardware-spoof.sh` only exports `LD_PRELOAD` on the exact string
+  `loaded`.** Anything else — missing file, unparseable ELF, empty file, or a
+  shim whose hooks do not resolve — leaves `LD_PRELOAD` unset, so the browser
+  runs uninstrumented.
+
+This distinction is not theoretical. The first version of the shim returned
+`-1`/`NULL` from any hook whose `dlsym(RTLD_NEXT, ...)` failed, on the theory
+that failing closed was safe. It is not: `open()` then failed for *every* path,
+including the dynamic loader's own calls, and the measured result was
+
+```
+/bin/sh: can't open '/usr/bin/chromium-browser'      # exit 2, no browser
+```
+
+— a shim that loaded, reported success, and prevented the browser from starting
+at all. The hooks now fall back to issuing the underlying syscall themselves,
+which is what libc was doing before we interposed, so an unresolvable shim
+degrades to "no spoofing" instead of "nothing works". **A shim that silently
+does nothing is misleading; a shim that stops the browser from launching is
+worse than no shim at all.**
+
 If you need the values genuinely masked — including from Chromium's own
 process — the only real options are to run the container with
 `--pid=host`-style isolation removed plus a `seccomp=unconfined` /
@@ -96,16 +156,19 @@ did not write fake files that nothing would read.
 ## Graceful degradation
 
 Nothing here is allowed to break a launch. `hardware-spoof.sh` was tested
-against: shim missing, shim present but not a valid ELF, fake tree
-unwritable, signature file corrupt, and profile directory read-only. In every
-case the script falls back, logs a warning to stderr, and Chromium starts.
+against: shim missing, shim present but not a valid ELF, shim empty, shim whose
+libc hooks do not resolve, fake tree unwritable, signature file corrupt, and
+profile directory read-only. In every case the script falls back, logs a
+warning to stderr, leaves `LD_PRELOAD` unset, and Chromium starts and renders.
 `stealth-launch.sh` additionally clamps a degenerate `CHROME_CPU_CORES` to 1
 rather than letting `taskset` abort the container.
 
-Note that musl's loader **silently ignores** an `LD_PRELOAD` it cannot load and
-still execs the program with status 0 — so "the process started" is not proof
-the shim is active. The load check therefore uses a probe file written by the
-shim's constructor.
+The one input that can still stop a launch is a **stale shim binary that lies
+about being healthy** — a build predating the `unusable` marker writes `loaded`
+unconditionally and would be trusted. The mitigation is not more logic in the
+shell but not shipping stale builds: the shim is compiled in the
+`hwspoof-build` stage from `scripts/docker/libhwspoof.c` in the same build as
+the scripts that load it, so the two cannot drift apart in a built image.
 
 ## Files
 
@@ -115,4 +178,4 @@ shim's constructor.
 | `scripts/docker/libhwspoof.c` | the LD_PRELOAD shim |
 | `scripts/docker/stealth-launch.sh` | `taskset` pinning (the real `hardwareConcurrency` control), clamps, banner |
 | `tests/test_hardware_spoof.sh` | schema, coherence invariant, backfill, legacy upgrade, degradation |
-| `Dockerfile` | `hwspoof-build` stage; copies the shim to `/usr/lib/libhwspoof.so` |
+| `Dockerfile` | `hwspoof-build` stage; copies the shim to `/usr/lib/libhwspoof.so`; self-test that the built shim is functional |

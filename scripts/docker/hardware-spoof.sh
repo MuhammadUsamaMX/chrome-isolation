@@ -17,12 +17,14 @@
 # (see scripts/docker/libhwspoof.c and scripts/docker/HOST-SPOOFING.md):
 #   * nproc / sched_getaffinity  -> REAL, via taskset (see stealth-launch.sh)
 #   * /proc/cpuinfo, /proc/meminfo, /proc/version, /sys/class/dmi/id/*, uname
-#     -> PARTIAL, only through the optional LD_PRELOAD shim, and only for
-#        consumers that go through libc. The container is unprivileged with
+#     -> OVERRIDDEN, but only through the optional LD_PRELOAD shim, and only
+#        for consumers that go through libc. The container is unprivileged with
 #        user-namespace creation blocked, so procfs/sysfs CANNOT be bind-mounted
-#        over and the files CANNOT be written. Anything issuing raw syscalls
-#        still sees the real host. If the shim is unavailable the entrypoint
-#        logs a warning and continues — it never aborts.
+#        over and the files CANNOT be written. A process issuing raw syscalls
+#        (which is what Chromium's own base:: file helpers do) still sees the
+#        real host, so this remains a partial mitigation. If the shim is
+#        missing or not functional the entrypoint logs a warning and continues
+#        with LD_PRELOAD unset — it never aborts and never blocks the launch.
 #
 # CHROME_CONFIG_DIR can be overridden for testing (defaults to the container
 # profile dir). CHROME_SPOOF_DIR controls where the faked sysfs/procfs view is
@@ -415,16 +417,28 @@ export CHROME_CPU_MODEL CHROME_CPU_VENDOR_ID CHROME_CPU_PHYSICAL_CORES \
 # file helpers — see scripts/docker/HOST-SPOOFING.md. Never fatal.
 HWSHIM_LIB="${CHROME_SPOOF_LIB:-/usr/lib/libhwspoof.so}"
 if [[ -r "$HWSHIM_LIB" && -d "$CHROME_SPOOF_ROOT/proc" ]]; then
-    # musl silently ignores an LD_PRELOAD it cannot load and still exits 0, so
-    # the process succeeding proves nothing. The shim's constructor writes a
-    # probe file; that is the actual evidence.
+    # Two separate things are being verified here, and conflating them is what
+    # previously made a broken shim look healthy:
+    #
+    #   1. Did the loader accept LD_PRELOAD at all? musl silently ignores an
+    #      entry it cannot load and still exits 0, so the process succeeding
+    #      proves nothing. The shim's constructor writes a probe file.
+    #   2. Are the shim's hooks actually functional? A shim can load perfectly
+    #      and still fail every dlsym(RTLD_NEXT, ...). The old "fail closed"
+    #      fallback in that case made open() return -1 for EVERY path, so the
+    #      dynamic loader could not map the browser and Chromium never started:
+    #      `/bin/sh: can't open '/usr/bin/chromium-browser'` (exit 2). The shim
+    #      now writes "unusable" instead of "loaded" in that situation, and we
+    #      refuse to export LD_PRELOAD — the browser then runs uninstrumented,
+    #      which is slow and leaky but always works.
     __probe="$CHROME_SPOOF_ROOT/.shim-probe.$$"
     rm -f "$__probe" 2>/dev/null
     if LD_PRELOAD="$HWSHIM_LIB" CHROME_SPOOF_PROBE="$__probe" \
-       /bin/true >/dev/null 2>&1 && [[ -s "$__probe" ]]; then
+       /bin/true >/dev/null 2>&1 && grep -qx 'loaded' "$__probe" 2>/dev/null; then
         export LD_PRELOAD="$HWSHIM_LIB"
     else
-        echo "hardware-spoof: $HWSHIM_LIB did not load; DMI/cpuinfo/meminfo NOT masked" >&2
+        echo "hardware-spoof: $HWSHIM_LIB is not usable; DMI/cpuinfo/meminfo NOT masked" \
+             "(running without it so the browser still starts)" >&2
     fi
     rm -f "$__probe" 2>/dev/null
     unset __probe
