@@ -11,15 +11,24 @@ import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SCRIPT = os.path.join(ROOT, 'tests', 'test_bridge_queue.mjs')
+
+
+def _run_node(script, timeout):
+    node = shutil.which('node')
+    if not node:
+        print(f'node not found — skipping {os.path.basename(script)}')
+        return
+    proc = subprocess.run([node, script], capture_output=True, text=True, cwd=ROOT, timeout=timeout)
+    sys.stdout.write(proc.stdout)
+    sys.stderr.write(proc.stderr)
+    assert proc.returncode == 0, f'{os.path.basename(script)} failed'
 
 
 def test_bridge_queue_never_hangs_a_queued_request():
-    node = shutil.which('node')
-    if not node:
-        print('node not found — skipping the bridge queue JavaScript tests')
-        return
-    proc = subprocess.run([node, SCRIPT], capture_output=True, text=True, cwd=ROOT, timeout=300)
-    sys.stdout.write(proc.stdout)
-    sys.stderr.write(proc.stderr)
-    assert proc.returncode == 0, 'electron/bridge_queue.js tests failed'
+    _run_node(os.path.join(ROOT, 'tests', 'test_bridge_queue.mjs'), 300)
+
+
+def test_bridge_queue_end_to_end_against_a_real_child():
+    # The unit suite uses fake children; this one drives a real spawn, a real
+    # broken stdin and a real SIGKILL, so the shipped code path is exercised.
+    _run_node(os.path.join(ROOT, 'tests', 'test_bridge_queue_e2e.mjs'), 300)
