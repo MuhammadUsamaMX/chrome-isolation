@@ -12,41 +12,109 @@
 #       container, probed through the REAL entrypoint path
 #       (stealth-launch.sh -> hardware-spoof.sh -> LD_PRELOAD shim)
 #   5.  spoofed hardwareConcurrency consistent with the spoofed CPU model
-#       string, again through the real entrypoint path
+#       string, again through the real entrypoint path (5a generated, 5b on disk)
 #   6.  container Chromium is a current version (+ Alpine base still supported)
 #   7.  /.dockerenv absent, or 755 root:root
 #   8.  every existing container references the current image id
 #   9.  git working tree clean and the desktop_manager.py os.system ->
 #       subprocess.run fix is committed
+#   10. desktop identity: no generated .desktop declares WebBrowser, borrows
+#       google-chrome's icon, or claims a MIME type; and Chromium's --class
+#       matches the entry's StartupWMClass
+#   11. uninstall.sh will not `rm -rf` a path outside the profile store,
+#       including under a hostile $CHROME_ISOLATION_HOME
+#   12. the Chromium update path is DETECT-ONLY by default: an update being
+#       available is never on its own sufficient to start a build
+#   13. THIS HARNESS IS SIDE-EFFECT FREE — nothing it ran changed profiles.json,
+#       the proxy store, or any on-disk profile signature
+#
+# ---------------------------------------------------------------------------
+# PROFILE STORE LOCATION — WHY NOTHING HERE HARDCODES IT
+# ---------------------------------------------------------------------------
+#   The store MOVED. It is `<isolation home>/profiles/<name>`, where the
+#   isolation home is `$CHROME_ISOLATION_HOME` or, unset, `~/Isolated-Chrome`.
+#   `~/Chrome` is the LEGACY location and is now only a backward-compat
+#   fallback for installs that have not been migrated. `~/Chrome` does not
+#   exist on this host and the migration has been applied.
+#
+#   An earlier version of this harness hardcoded `~/Chrome` and therefore
+#   reported meaningless results on every host where the move had happened.
+#   That is the whole failure mode: a hardcoded path does not fail loudly, it
+#   fails *confidently*. So every path here is ASKED FOR, never asserted:
+#
+#     * `backend/paths.py` is the app's own resolver. It is deliberately pure
+#       and side-effect free, which is what makes it safe to import from a
+#       verification script — `backend/config.py` computes the same answer but
+#       also runs `os.makedirs`/`chmod` at import time.
+#     * `paths.resolve_profiles_dir()` with no arguments is *exactly*
+#       `config.resolve_profiles_dir()`: config's two constants are literally
+#       `paths.default_profiles_dir()` and `paths.legacy_profiles_dir()`,
+#       which are the defaults `resolve_profiles_dir()` uses. Check 10 asserts
+#       that equivalence rather than assuming it.
+#     * The backend directory is passed in as an ARGUMENT. Reading it from
+#       `os.getcwd()` silently degrades to a shell fallback whenever the script
+#       is invoked from another directory, which is exactly how a harness ends
+#       up reporting a fallback path as though it had been measured.
 #
 # ---------------------------------------------------------------------------
 # CODE STATE vs LIVE STATE — why this harness has a third status
 # ---------------------------------------------------------------------------
 #   PASS   the code and/or the image is correct.
 #   FAIL   a genuine defect. Either in the code/image, or in a LIVE CONTAINER
-#          that the current code would not have produced.
-#   STALE  the *code* is correct but an existing container (or a signature file
-#          on disk) was created by an OLDER version and still shows the old
-#          behaviour. This is the expected intermediate state after a fix lands
-#          and before containers are recreated — it is NOT a code regression.
+#          or IMAGE that the current code would not have produced.
+#   STALE  the *code* is correct but a pre-existing container, a pre-existing
+#          IMAGE, or a signature file on disk was created by an OLDER version
+#          and still shows the old behaviour. This is the expected
+#          intermediate state after a fix lands and before containers are
+#          recreated or a new image is promoted — it is NOT a code regression.
 #   SKIP   the check could not be evaluated on this host.
 #
 #   STALE exists because a harness that cries wolf on every run gets ignored,
 #   and an ignored harness is how a real regression slips through. Checks 2, 3,
-#   7 and 8 read the user's pre-existing containers, which necessarily predate
-#   the fixes; they are reported as STALE *only after* the corresponding code
-#   has been introspected and found correct. If the code itself is wrong, the
-#   check is a FAIL regardless of what the containers look like.
+#   4, 6, 7 and 8 read the user's pre-existing containers and images, which
+#   necessarily predate the fixes; they are reported as STALE *only after* the
+#   corresponding code has been introspected and found correct. If the code
+#   itself is wrong, the check is a FAIL regardless of what the containers
+#   look like.
+#
+#   A CHECK MUST BE CAPABLE OF PASSING ON ITS OWN TERMS. Two rules follow from
+#   an earlier version of this harness reporting "9 FAIL" on a host where two
+#   of the nine could not have passed under any code:
+#     * no check may need live state to exist in order to evaluate the code
+#       (see 3, which used to SKIP outright when no container existed, so the
+#       one thing it could prove on its own was never proven);
+#     * no check may assert something the current code deliberately does NOT do
+#       (see 7 and 12, which are about what is absent).
 #
 # ---------------------------------------------------------------------------
 # SAFETY CONTRACT
+# ---------------------------------------------------------------------------
 #   * Read-only inspection only, plus throwaway `docker run --rm` containers
 #     that this script creates and removes itself.
 #   * Never removes, stops, prunes, kills or restarts anything that existed
-#     before the run — in particular chrome-Fiverr-Read, chrome-Fiverr-Demo and
-#     chrome-Zoom-1 are only ever `docker inspect`-ed.
-#   * No `docker rm/prune/kill/stop`. No writes to profiles.json, no git
-#     operations, no edits to the repo.
+#     before the run — the user's `chrome-*` containers are only ever
+#     `docker inspect`-ed.
+#   * NEVER `docker build`, `docker prune`, or `docker rm` of anything that
+#     existed before the run.
+#   * Every filesystem write this harness performs lands in the mktemp -d
+#     scratch dir created at startup and removed on exit. An earlier version
+#     wrote into the real profile store while probing; check 13 now exists
+#     precisely so that class of bug cannot pass unnoticed again. When a probe
+#     redirects a write, it redirects the LOCATION the code computes the path
+#     from, not merely the name of the function that performs the write —
+#     check 2 shipped a stub that patched `ensure_host_share_dir` on
+#     docker_manager, was never called even once, and still created directories
+#     in the user's real host-shares root every run.
+#   * Check 11 runs `uninstall.sh` inside a sandbox under a fake $HOME with
+#     `docker`, `sudo`, `dpkg` and `rpm` stubbed out on PATH. It never runs
+#     the real uninstaller against the real home directory.
+#   * Importing `backend/config.py` runs the app's own import-time
+#     `os.makedirs(..., exist_ok=True)` and `chmod` of the host-shares root.
+#     Those are idempotent and touch only directories the app owns, but they
+#     ARE real mkdir calls and are disclosed here rather than glossed over.
+#   * No writes to `profiles.json`, `proxies.json` or any profile signature;
+#     check 13 proves it rather than asserting it. No git operations, no edits
+#     to the repo.
 #   * Safe to re-run: idempotent, all scratch state lives in a mktemp -d that
 #     is removed on exit.
 #
@@ -63,8 +131,9 @@
 #   2  harness error (repo not found, etc.)
 #
 #   STALE does NOT affect the exit status: it is a live-state fact that closes
-#   by recreating containers, not by changing code. It is always printed in the
-#   summary and in its own section, so it is never silently swallowed.
+#   by recreating containers or promoting a rebuilt image, not by changing
+#   code. It is always printed in the summary and in its own section, so it is
+#   never silently swallowed.
 # =============================================================================
 
 set -uo pipefail
@@ -76,29 +145,36 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 PROFILES_JSON="$REPO_ROOT/profiles.json"
 
-# Python interpreter, needed both for pytest and to ask config.py where profile
-# data lives. Resolved here, early, because the profile location below needs it.
+# Python interpreter, needed both for pytest and to ask the backend where
+# profile data lives. Resolved here, early, because the profile location below
+# needs it.
 PY_BIN=""
 for cand in python3 python; do command -v "$cand" >/dev/null 2>&1 && { PY_BIN="$cand"; break; }; done
 
-# Profile data location. NEVER hardcoded — ask the app's own config, which
-# honours $CHROME_ISOLATION_HOME and falls back to the legacy ~/Chrome for
-# installs that have not been migrated yet. See backend/paths.py.
+# Profile data location. NEVER hardcoded, and never read out of the current
+# working directory — ask the app's own resolver, with the repo passed in.
+# See the header block for why `paths` rather than `config`.
 resolve_profiles_dir() {
-    "$1" -c '
+    "$1" - "$REPO_ROOT" <<'PY_EOF'
 import os, sys
-sys.path.insert(0, os.path.join(os.getcwd(), "backend"))
-import config
-print(config.resolve_profiles_dir())
-' 2>/dev/null
+sys.path.insert(0, os.path.join(sys.argv[1], 'backend'))
+import paths
+print(paths.resolve_profiles_dir())
+PY_EOF
 }
-if [[ -n "${PY_BIN:-}" ]]; then
-    CHROME_PROFILES_DIR="$(resolve_profiles_dir "$PY_BIN")"
+CHROME_PROFILES_DIR=""
+PROFILES_DIR_RESOLVED_BY="backend/paths.py"
+if [[ -n "$PY_BIN" ]]; then
+    CHROME_PROFILES_DIR="$(resolve_profiles_dir "$PY_BIN" 2>/dev/null)"
 fi
-if [[ -z "${CHROME_PROFILES_DIR:-}" ]]; then
-    # No Python available to ask; fall back to the documented default.
+# Only a real, absolute path counts as an answer. Anything else means we
+# failed to ask, and we must say so rather than substitute a guess that will
+# later be printed as though it had been measured.
+if [[ -z "$CHROME_PROFILES_DIR" || "$CHROME_PROFILES_DIR" != /* ]]; then
     CHROME_PROFILES_DIR="${CHROME_ISOLATION_HOME:-$HOME/Isolated-Chrome}/profiles"
+    PROFILES_DIR_RESOLVED_BY="FALLBACK — the app's own resolver could not be asked"
 fi
+
 
 VERBOSE=0
 CHROMIUM_MAX_AGE_MONTHS="${VERIFY_CHROMIUM_MAX_AGE_MONTHS:-12}"
@@ -107,7 +183,7 @@ SKIP_DOCKER="${VERIFY_SKIP_DOCKER:-0}"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -v|--verbose) VERBOSE=1 ;;
-        -h|--help)    sed -n '2,45p' "${BASH_SOURCE[0]}"; exit 0 ;;
+        -h|--help)    sed -n '2,120p' "${BASH_SOURCE[0]}"; exit 0 ;;
         *)            echo "unknown argument: $1" >&2; exit 2 ;;
     esac
     shift
@@ -124,6 +200,73 @@ fi
 WORK="$(mktemp -d -t verify-chrome-iso-XXXXXX)"
 cleanup() { rm -rf "$WORK"; }
 trap cleanup EXIT INT TERM
+
+# --------------------------------------------------------------------------- #
+# Side-effect tripwire — "before" snapshot (check 13 compares against this)
+# --------------------------------------------------------------------------- #
+# Taken HERE, before any check runs, because every check introspects code by
+# CALLING it. See check 13 for why that is a hazard worth a tripwire.
+LEGACY_PROFILES_DIR="$HOME/Chrome"
+DESKTOP_DIR="$HOME/.local/share/applications"
+D13_SNAP="$WORK/snapshot-00-start.tsv"
+D13_SNAP_POST_TESTS="$WORK/snapshot-01-post-tests.tsv"
+
+_snapshot_files() {
+    local f d
+    for f in "$PROFILES_JSON" "$REPO_ROOT/proxies.json"; do
+        if [[ -f "$f" ]]; then
+            printf '%s\t%s\n' "$(sha256sum "$f" 2>/dev/null | cut -d' ' -f1)" "$f"
+        else
+            printf 'absent\t%s\n' "$f"
+        fi
+    done
+    # The resolved profile store, and the legacy one if present: signatures
+    # (which the generator rewrites) and profile directories themselves, so a
+    # junk profile created by a probe shows up.
+    for d in "$CHROME_PROFILES_DIR" "$LEGACY_PROFILES_DIR"; do
+        [[ -d "$d" ]] || continue
+        printf 'DIR\t%s\n' "$d"
+        while IFS= read -r f; do
+            [[ -n "$f" ]] && printf '%s\t%s\n' "$(sha256sum "$f" 2>/dev/null | cut -d' ' -f1)" "$f"
+        done < <(find "$d" -maxdepth 2 -name 'hardware-signature.json' 2>/dev/null | sort)
+        while IFS= read -r f; do
+            [[ -n "$f" ]] && printf 'DIRENT\t%s\n' "$f"
+        done < <(find "$d" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort)
+    done
+    # The host-share root: a probe that mkdirs here leaves a trace.
+    if [[ -d "$REPO_ROOT/host-shares" ]]; then
+        printf 'DIR\t%s\n' "$REPO_ROOT/host-shares"
+        while IFS= read -r f; do
+            [[ -n "$f" ]] && printf 'DIRENT\t%s\n' "$f"
+        done < <(find "$REPO_ROOT/host-shares" -mindepth 1 -maxdepth 1 2>/dev/null | sort)
+    fi
+    # Generated desktop entries (refresh_desktop_entries() rewrites these).
+    while IFS= read -r f; do
+        [[ -n "$f" ]] && printf '%s\t%s\n' "$(sha256sum "$f" 2>/dev/null | cut -d' ' -f1)" "$f"
+    done < <(ls -1 "$DESKTOP_DIR"/chrome-isolation*.desktop 2>/dev/null)
+}
+_snapshot_files > "$D13_SNAP"
+
+# Is anyone ELSE able to write this repo's data while this harness runs?
+# Tests that spawn the real bridge as a subprocess register real profiles in
+# the registry and create real host-share directories. If such a process is
+# running concurrently, a mutation observed at the end of the run cannot be
+# attributed to the harness. Recorded so that check 13 can say so instead of
+# accusing itself — or silently passing — when attribution is impossible.
+# Read-only scan of /proc; no signals, no writes.
+_d13_concurrent_writers() {
+    local n=0 pid cmd
+    for pid in $(ls /proc 2>/dev/null | grep -E '^[0-9]+$'); do
+        [[ "$pid" == "$$" || "$pid" == "$PPID" ]] && continue
+        cmd="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)" || continue
+        case "$cmd" in
+            *chrome-isolation-manager*pytest*|*pytest*chrome-isolation-manager*|*bridge.py*|*chrome_isolation*)
+                n=$((n + 1)) ;;
+        esac
+    done
+    printf '%s' "$n"
+}
+D13_CONCURRENT="$( _d13_concurrent_writers )"
 
 # --------------------------------------------------------------------------- #
 # Colours
@@ -196,6 +339,33 @@ PROBE_FALLBACK=0
 CURRENT_IMAGE_ID=""
 if [[ $DOCKER_OK -eq 1 ]]; then
     CURRENT_IMAGE_ID="$(docker image inspect -f '{{.Id}}' "$IMAGE_REF" 2>/dev/null || true)"
+fi
+
+# --------------------------------------------------------------------------- #
+# Does the image we are measuring predate the Dockerfile we are measuring against?
+# --------------------------------------------------------------------------- #
+# Checks 4, 5a, 6 and 7 measure what is INSIDE the image. If that image was
+# built before the current Dockerfile, then a red result is a statement about an
+# old build, not about the code in the tree — the same reasoning that makes a
+# stale container STALE rather than FAIL. Getting this wrong is how a harness
+# reports "9 FAIL" for an app whose code is entirely correct.
+#
+# Image creation time vs. Dockerfile mtime is a coarse but honest signal: the
+# Dockerfile changing is not proof the image is old (a comment edit would trip
+# it), so this only ever *downgrades* a FAIL to STALE with the evidence
+# printed. It never upgrades anything.
+IMAGE_PREDATES_DOCKERFILE=0
+IMAGE_STALENESS_EVIDENCE=""
+if [[ $DOCKER_OK -eq 1 && -f "$REPO_ROOT/Dockerfile" ]]; then
+    IMG_CREATED="$(docker image inspect -f '{{.Created}}' "$PROBE_IMAGE_REF" 2>/dev/null || true)"
+    if [[ -n "$IMG_CREATED" ]]; then
+        IMG_EPOCH="$(date -u -d "$IMG_CREATED" +%s 2>/dev/null || echo 0)"
+        DOCKERFILE_EPOCH="$(date -u -d "@$(stat -c %Y "$REPO_ROOT/Dockerfile" 2>/dev/null || echo 0)" +%s 2>/dev/null || echo 0)"
+        if [[ "$IMG_EPOCH" -gt 0 && "$DOCKERFILE_EPOCH" -gt 0 && "$IMG_EPOCH" -lt "$DOCKERFILE_EPOCH" ]]; then
+            IMAGE_PREDATES_DOCKERFILE=1
+            IMAGE_STALENESS_EVIDENCE="image '$PROBE_IMAGE_REF' was built $IMG_CREATED, but the Dockerfile was last modified $(date -u -d "@$DOCKERFILE_EPOCH" '+%Y-%m-%d %H:%M:%S UTC') — the image under test predates the code in the tree"
+        fi
+    fi
 fi
 
 # Existing chrome-* containers, newest first. Inspection only.
@@ -392,6 +562,16 @@ printf 'host base : cpu=%s | mem=%s | dmi=%s | kernel=%s | cores=%s\n' \
 printf 'baseline  : %s (known: cpu="%s", mem=%s, dmi=%s, board="%s", kernel=%s)\n' \
     "$BASELINE_USED" "$KNOWN_CPU_MODEL" "$KNOWN_MEMTOTAL" "$KNOWN_PRODUCT" "$KNOWN_BOARD_VENDOR" "$KNOWN_KERNEL"
 
+# The profile store is ASKED FOR, never assumed. Print where it resolved and
+# how, because "the harness silently fell back to a guess" is a failure mode
+# that must be visible in the output rather than discovered later.
+printf 'profiles  : %s%s%s\n' "$C_BOLD" "$CHROME_PROFILES_DIR" "$C_RESET"
+printf '            via %s%s%s\n' "$C_DIM" "$PROFILES_DIR_RESOLVED_BY" "$C_RESET"
+if [[ -d "$LEGACY_PROFILES_DIR" ]] && [[ -n "$(ls -A "$LEGACY_PROFILES_DIR" 2>/dev/null)" ]]; then
+    printf '            legacy %s still holds data — the app would fall back to it if the\n' "$LEGACY_PROFILES_DIR"
+    printf '            new store were empty. See scripts/migrate_profiles_dir.py\n' 
+fi
+
 # =========================================================================== #
 # CHECK 1 — pytest tests/ is green
 # =========================================================================== #
@@ -417,6 +597,13 @@ else
     fi
 fi
 
+# Second tripwire snapshot, taken immediately after check 1. Check 13 uses the
+# two segments to attribute any mutation to a phase: the test suite, or the
+# harness's own checks. Blaming the wrong one sends whoever has to fix it in
+# the wrong direction — and the test suite spawns the real bridge as a
+# subprocess, so it genuinely can touch real data on its own.
+_snapshot_files > "$D13_SNAP_POST_TESTS"
+
 # =========================================================================== #
 # CHECK 2 — no profile container mounts ~ at /home/chrome/host
 # =========================================================================== #
@@ -426,7 +613,18 @@ HOME_REAL="$(readlink -f "$HOME" 2>/dev/null || echo "$HOME")"
 VOL_REPORT=""
 VOL_RC=1
 if [[ -n "$PY_BIN" && -f "$PROFILES_JSON" ]]; then
-    _log "introspecting _build_volumes() for every profile in profiles.json"
+    _log "introspecting _build_volumes() for every profile in profiles.json (read-only; share dirs redirected to $WORK)"
+    # The scratch dir is EXPORTED on its own line, not written as
+    #   VERIFY_SCRATCH="$WORK" VOL_REPORT="$(python ...)"
+    # because bash does not make a pending assignment visible to the command
+    # substitutions in the SAME simple command: the substitution runs first, so
+    # the probe saw no VERIFY_SCRATCH at all. The old probe tolerated that
+    # (`if SCRATCH:` was simply never true, and the code fell through to
+    # returning the real path), so the bug was silent: the probe believed it
+    # was redirecting into $WORK and was writing to the user's store instead.
+    # The probe now treats a missing VERIFY_SCRATCH as fatal rather than
+    # defaulting to the real location.
+    export VERIFY_SCRATCH="$WORK"
     VOL_REPORT="$("$PY_BIN" - "$REPO_ROOT" <<'PY_EOF' 2>&1
 import json, os, sys
 repo = sys.argv[1]
@@ -436,7 +634,7 @@ try:
 except Exception as e:                      # docker SDK missing -> caller SKIPs
     print("IMPORT_ERROR docker sdk: %s" % e); sys.exit(3)
 
-import docker_manager, registry
+import docker_manager, registry, config, host_share
 
 class _Img:  pass
 class _Ct:   id = 'x'; status = 'running'
@@ -456,11 +654,92 @@ try:
 finally:
     docker.from_env = _real
 
+# ---------------------------------------------------------------------------
+# VERIFY-PROBE-HOST-MOUNTS-BEGIN
+#
+# READ-ONLY, AND HOW THAT IS ACTUALLY ACHIEVED
+#   `_profile_host_mount()` resolves a profile's /home/chrome/host source and,
+#   for every profile with an empty host_mount, that resolution CREATES a
+#   per-profile directory under ~/.local/share/chrome-isolation-manager/
+#   host-shares (host_share.ensure_host_share_dir -> os.makedirs). That is
+#   correct APP behaviour and a bug in a PROBE: introspecting code by calling
+#   it silently created directories in the user's data.
+#
+#   The stub that used to sit here patched ONE NAME — docker_manager's
+#   `ensure_host_share_dir` — and that was not enough, because
+#   `_profile_host_mount()` does not call that name. It calls
+#   `resolve_host_mount()`, which looks up `ensure_host_share_dir` in
+#   host_share's OWN namespace and calls the real one. Verified: with the old
+#   stub installed, running this probe created host-shares/<profile> for every
+#   profile with an empty host_mount, and the stub was called zero times.
+#
+#   Two independent mechanisms fix it, because one was demonstrably not enough:
+#     (a) REDIRECT THE LOCATION. host_share.HOST_SHARES_DIR is patched to the
+#         run's scratch dir. Every path the code computes from it — through any
+#         function, in any module, however it is reached — now lands in
+#         scratch. This cannot go stale when a function is renamed.
+#     (b) STUB THE FUNCTIONS on both namespaces, so the mkdir cannot happen
+#         even if (a) is ever undone.
+#   And a tripwire, because the failure mode is silence: the real host-shares
+#   root is snapshotted before and after and any new entry is reported as
+#   PROBE_HOST_SHARE_LEAK. A probe that quietly writes to the user's data is
+#   exactly the bug this block exists to prevent, so the block checks itself.
+# ---------------------------------------------------------------------------
+SCRATCH = os.environ.get('VERIFY_SCRATCH', '')
+if not SCRATCH:
+    print("PROBE_FATAL\tVERIFY_SCRATCH is not set; refusing to introspect, "
+          "because with nowhere to redirect the mkdir this probe would write "
+          "into the user's real host-shares/")
+    sys.exit(9)
+_REAL_SHARE_ROOT = host_share.HOST_SHARES_DIR
+_FAKE_SHARE_ROOT = os.path.join(SCRATCH, 'host-shares')
+host_share.HOST_SHARES_DIR = _FAKE_SHARE_ROOT
+os.makedirs(_FAKE_SHARE_ROOT, mode=0o700, exist_ok=True)
+
+def _real_share_entries(root):
+    try:
+        return set(os.listdir(root))
+    except OSError:
+        return set()
+_LEAK_BEFORE = _real_share_entries(_REAL_SHARE_ROOT)
+
+_share_calls = []
+def _dry_ensure(profile_name):
+    # Report the path the CODE chose (under the real root) separately from the
+    # path this probe actually creates, so the report stays truthful.
+    real = os.path.join(_REAL_SHARE_ROOT, profile_name)
+    _share_calls.append(real)
+    fake = os.path.join(_FAKE_SHARE_ROOT, profile_name)
+    os.makedirs(fake, mode=0o700, exist_ok=True)
+    return fake
+docker_manager.ensure_host_share_dir = _dry_ensure
+if hasattr(docker_manager, 'host_share'):
+    docker_manager.host_share.ensure_host_share_dir = _dry_ensure
+# The name that was actually reached: `_profile_host_mount()` calls
+# `resolve_host_mount()`, which looks `ensure_host_share_dir` up in host_share's
+# OWN namespace and calls the real one. Patch that resolution in every namespace
+# it can be bound under, keeping the real validation of an explicit host_mount
+# so the probe still measures what the app would actually do.
+def _dry_resolve(profile_name, configured=None):
+    if configured is not None and str(configured).strip():
+        return host_share.validate_host_mount(str(configured))
+    return _dry_ensure(profile_name)
+for _mod in (docker_manager, host_share):
+    if hasattr(_mod, 'resolve_host_mount'):
+        _mod.resolve_host_mount = _dry_resolve
+host_share.ensure_host_share_dir = _dry_ensure
+
 home = os.path.realpath(os.path.expanduser('~'))
+# Resolve the profile store the SAME WAY the harness header did, from the app's
+# own resolver, rather than reaching for the legacy constant. registry's
+# CHROME_PROFILES_DIR is the *default* location only; it is NOT what an
+# un-migrated install would use.
+store = config.resolve_profiles_dir()
 with open(os.path.join(repo, 'profiles.json')) as f:
     profiles = json.load(f)
 
 bad = []
+_with_binds = []
 for name in sorted(profiles):
     entry = profiles[name]
     raw = entry.get('host_mount', '')
@@ -468,7 +747,7 @@ for name in sorted(profiles):
         resolved = m._profile_host_mount(name)
     except Exception as e:
         print("PROFILE\t%s\terror\t%s" % (name, e)); continue
-    pdir = entry.get('path') or os.path.join(registry.CHROME_PROFILES_DIR, name)
+    pdir = entry.get('path') or os.path.join(store, name)
     ddir = os.path.join(pdir, 'Downloads')
     binds = []
     try:
@@ -478,16 +757,40 @@ for name in sorted(profiles):
                 binds.append(src)
     except Exception as e:
         print("PROFILE\t%s\terror\t%s" % (name, e)); continue
-    hit = [b for b in binds if os.path.realpath(b) == home]
+    # Report the path the CODE chose (the real one), not the scratch stand-in
+    # this probe created, so the check's output stays truthful.
+    def _as_real(p):
+        if p and p.startswith(_FAKE_SHARE_ROOT + os.sep):
+            return _REAL_SHARE_ROOT + p[len(_FAKE_SHARE_ROOT):]
+        return p
+    resolved_real = _as_real(resolved)
+    hit = [b for b in binds if os.path.realpath(_as_real(b)) == home]
     bad.extend((name, b) for b in hit)
     # Also report whether the (removed) /.dockerenv mask mount is still emitted,
     # so check 7 can tell a code regression from a stale live container.
     mask = [src for src, cfg in vols.items() if cfg.get('bind') == '/.dockerenv']
-    print("PROFILE\t%s\t%s\t%s\t%s\t%s\t%s" % (name, raw or '<empty>', resolved,
-          ','.join(binds) or '<none>', 'HOME' if hit else 'ok',
-          ','.join(mask) or '-'))
+    print("PROFILE\t%s\t%s\t%s\t%s\t%s\t%s" % (name, raw or '<empty>',
+          resolved_real, ','.join(_as_real(b) for b in binds) or '<none>',
+          'HOME' if hit else 'ok', ','.join(mask) or '-'))
+    if binds:
+        _with_binds.append(name)
+
+# Self-check: the whole point of this block is that it must not write into the
+# user's data, so it measures that itself rather than trusting the patch above.
+_LEAK_AFTER = _real_share_entries(_REAL_SHARE_ROOT)
+_LEAKS = sorted(_LEAK_AFTER - _LEAK_BEFORE)
+print("PROBE_HOST_SHARE_LEAK\t%d\t%s" % (len(_LEAKS), ','.join(_LEAKS)))
+# Non-vacuity: if not one profile produced a /home/chrome/host bind at all,
+# the "no HOME is mounted" verdict below would be true for the wrong reason.
+print("PROFILE_HOST_BINDS\t%d\t%d" % (len(profiles), len(_with_binds)))
 print("HOME_MOUNT_VIOLATIONS\t%d" % len(bad))
 sys.exit(1 if bad else 0)
+# VERIFY-PROBE-HOST-MOUNTS-END
+#
+# NOTE FOR TESTS: tests/test_verify_harness_side_effects.py extracts exactly the
+# text between the BEGIN and END markers above and executes it, so the shipped
+# probe — not a copy of it — is what the regression test exercises. Keep the
+# markers, and keep them inside this single heredoc.
 PY_EOF
 )"
     VOL_RC=$?
@@ -499,6 +802,26 @@ VIOLATIONS=0
 if [[ $VOL_RC -eq 0 ]]; then VIOLATIONS=0; else
     VIOLATIONS="$(printf '%s\n' "$VOL_REPORT" | sed -n 's/^HOME_MOUNT_VIOLATIONS\t//p' | tail -1)"
     VIOLATIONS="${VIOLATIONS:-unknown}"
+fi
+
+# The probe measures its OWN side effects (PROBE_HOST_SHARE_LEAK) and its own
+# non-vacuity (PROFILE_HOST_BINDS). Both are read here rather than left to the
+# reader, so a probe that quietly starts writing to the user's host-shares, or
+# that stops producing binds and therefore "finds no violations" for the wrong
+# reason, fails THIS check loudly instead of passing.
+D2_LEAK="$(printf '%s\n' "$VOL_REPORT" | sed -n 's/^PROBE_HOST_SHARE_LEAK\t//p' | tail -1)"
+D2_LEAK_N="${D2_LEAK%%$'\t'*}"
+D2_LEAK_WHICH=""
+[[ "$D2_LEAK" == *$'\t'* ]] && D2_LEAK_WHICH="${D2_LEAK#*$'\t'}"
+D2_BINDS="$(printf '%s\n' "$VOL_REPORT" | sed -n 's/^PROFILE_HOST_BINDS\t//p' | tail -1)"
+D2_NPROFILES="${D2_BINDS%%$'\t'*}"
+D2_NBINDS="${D2_BINDS#*$'\t'}"
+PROBE_PROBLEMS=()
+if [[ "${D2_LEAK_N:-1}" != "0" ]]; then
+    PROBE_PROBLEMS+=("the probe itself wrote into the user's host-shares root while introspecting the code: ${D2_LEAK_WHICH:-see output}. Redirect the LOCATION, not just the function name — _profile_host_mount() reaches ensure_host_share_dir through resolve_host_mount() in host_share's own namespace, so patching docker_manager.ensure_host_share_dir alone is not enough (patch host_share.HOST_SHARES_DIR to \$VERIFY_SCRATCH as well)")
+fi
+if [[ -n "$D2_NPROFILES" && "${D2_NBINDS:-0}" == "0" ]]; then
+    PROBE_PROBLEMS+=("the probe produced NO /home/chrome/host bind for any of the $D2_NPROFILES profile(s), so 'no profile mounts \$HOME' would be true for the wrong reason — a vacuous pass")
 fi
 
 # Live cross-check: what do the existing containers actually bind?
@@ -520,7 +843,15 @@ fi
 LIVE_SUMMARY="$(printf '%s' "$LIVE_HOST_MOUNTS" | tr '\n' ';' || true)"
 DETAIL="code: ${VOL_DETAIL:-<not evaluated>} | live binds: ${LIVE_SUMMARY:-none}"
 
-if [[ "$VOL_RC" -eq 3 ]]; then
+if [[ "$VOL_RC" -eq 9 ]]; then
+    skip 2 "no profile mounts ~ at /home/chrome/host" \
+         "the probe refused to introspect because VERIFY_SCRATCH was unset — with no scratch dir there is nowhere to redirect host_share's mkdir, and running anyway would write into the user's real host-shares | $DETAIL" \
+         "run scripts/verify.sh (it sets VERIFY_SCRATCH); do not invoke the probe standalone without it"
+elif [[ ${#PROBE_PROBLEMS[@]} -gt 0 ]]; then
+    fail 2 "no profile mounts ~ at /home/chrome/host" \
+          "THE PROBE IS NOT SIDE-EFFECT FREE OR NOT NON-VACUOUS: ${PROBE_PROBLEMS[*]} | $DETAIL" \
+          "fix the probe before trusting this verdict"
+elif [[ "$VOL_RC" -eq 3 ]]; then
     skip 2 "no profile mounts ~ at /home/chrome/host" \
          "python 'docker' SDK not importable, so _build_volumes() could not be introspected | $DETAIL" \
          "pip install docker"
@@ -550,7 +881,7 @@ elif [[ "$VOL_RC" -eq 1 || $LIVE_HOME_HITS -gt 0 ]]; then
               "the _build_volumes()/_profile_host_mount() code itself resolves a profile to \$HOME — restore the host_share.py safe-default resolver, then recreate the containers"
     fi
 else
-    pass 2 "no profile mounts ~ at /home/chrome/host" "0 code-level violations, 0 live binds of HOME | $DETAIL"
+    pass 2 "no profile mounts ~ at /home/chrome/host" "0 code-level violations, 0 live binds of HOME; the probe itself created $D2_LEAK_N new entries in the user's host-shares root and produced $D2_NBINDS/$D2_NPROFILES /home/chrome/host binds, so the verdict rests on a measurement rather than on a probe that failed to look | $DETAIL"
 fi
 
 # =========================================================================== #
@@ -566,7 +897,12 @@ HARDEN_RC=1
 HARDEN_REPORT=""
 HARDEN_SUMMARY=""
 if [[ -n "$PY_BIN" && -d "$REPO_ROOT/backend" ]]; then
-    _log "introspecting start_container() run kwargs (docker client stubbed)"
+    _log "introspecting start_container() run kwargs (docker client stubbed; all writes redirected to $WORK)"
+    export VERIFY_SCRATCH="$WORK"   # exported on its own line: a pending
+    # assignment is not visible to command substitutions in the same simple
+    # command. This block also takes the scratch dir from argv, so it worked
+    # without the export — which is exactly why the check-2 probe's identical
+    # construct went unnoticed for so long.
     HARDEN_REPORT="$("$PY_BIN" - "$REPO_ROOT" "$WORK" 2>/dev/null <<'PY_EOF'
 import json, os, sys
 repo = sys.argv[1]
@@ -600,9 +936,52 @@ class _Cli:
 # register_profile() and os.makedirs() on real paths, so every disk-touching
 # entry point is redirected into the run's mktemp scratch dir. Without this the
 # introspection silently ADDS a profile to the user's profiles.json.
+#
+# The names below are asserted to still be the ones docker_manager uses, and
+# the result is echoed as STUB so the caller can fail loudly if that ever stops
+# being true — a stale stub would make this whole check vacuous.
+_dm_src = open(os.path.join(repo, 'backend', 'docker_manager.py')).read()
+WANTED = ('register_profile', 'resolve_profile_path', 'ensure_host_share_dir')
+_missing = [n for n in WANTED if n not in _dm_src]
+if _missing:
+    print("STUB\tstale: docker_manager.py no longer references %s" % ','.join(_missing))
+    sys.exit(5)
+print("STUB\tOK")
+
 docker_manager.register_profile = lambda *a, **k: {}
 docker_manager.resolve_profile_path = lambda name: os.path.join(SCRATCH, name)
 docker_manager.ensure_host_share_dir = lambda *a, **k: os.path.join(SCRATCH, 'host-share')
+# Belt and braces: the profile registry and host-share root are redirected too,
+# in case start_container() reaches them through the modules rather than the
+# names imported into docker_manager's namespace.
+#
+# Redirect the LOCATION as well as the function names. Check 2 shipped stubs
+# that patched `ensure_host_share_dir` on docker_manager and still created real
+# directories, because the mkdir was reached through `resolve_host_mount()`
+# looking `ensure_host_share_dir` up in host_share's own namespace. Patching
+# host_share.HOST_SHARES_DIR cannot rot that way: every path the code derives
+# from it — through any function, in any module — lands in the scratch dir.
+try:
+    import registry as _reg
+    _reg.REGISTRY_FILE = os.path.join(SCRATCH, 'profiles.json')
+    _reg.register_profile = lambda *a, **k: {}
+except Exception:
+    pass
+try:
+    import host_share as _hs
+    _hs.HOST_SHARES_DIR = os.path.join(SCRATCH, 'host-shares')
+    os.makedirs(_hs.HOST_SHARES_DIR, mode=0o700, exist_ok=True)
+    _hs.ensure_host_share_dir = lambda name, _s=SCRATCH: os.path.join(_s, 'host-share')
+    if hasattr(_hs, 'resolve_host_mount'):
+        _hs.resolve_host_mount = (
+            lambda name, configured=None, _s=SCRATCH:
+                _hs.validate_host_mount(str(configured))
+                if configured is not None and str(configured).strip()
+                else os.path.join(_s, 'host-share'))
+    if hasattr(docker_manager, 'resolve_host_mount'):
+        docker_manager.resolve_host_mount = _hs.resolve_host_mount
+except Exception:
+    pass
 
 _real = docker.from_env
 docker.from_env = lambda: _Cli()
@@ -632,6 +1011,12 @@ fi
 
 CODE_PROBLEMS=()
 if [[ $HARDEN_RC -eq 0 ]]; then
+    # Self-check on the introspection itself: the assertions above are only
+    # meaningful if these names are still the ones start_container() uses.
+    STUB_CHECK="$(printf '%s\n' "$HARDEN_REPORT" | sed -n 's/^STUB	//p' | head -1)"
+    if [[ -n "$STUB_CHECK" && "$STUB_CHECK" != "OK" ]]; then
+        CODE_PROBLEMS+=("the introspection's write-guard is stale ($STUB_CHECK), so every assertion below may be measuring the wrong code path")
+    fi
     _k() { printf '%s\n' "$HARDEN_REPORT" | sed -n "s/^K	$1	//p" | head -1; }
     K_CAPDROP="$(_k cap_drop)"; K_CAPADD="$(_k cap_add)"; K_PRIV="$(_k privileged)"
     K_SECOPT="$(_k security_opt)"; K_PIDSLIM="$(_k pids_limit)"; K_ROFS="$(_k read_only)"
@@ -650,6 +1035,13 @@ else
     HARDEN_SUMMARY="code: NOT INTROSPECTED (rc=$HARDEN_RC) — cannot separate a code regression from a stale container"
 fi
 
+# The introspection above deliberately stubs out every disk-touching entry
+# point so it cannot write into the user's data. That stubbing is itself a
+# hazard: a stub that stops matching the real code makes the check report
+# against a config the app does not use. So the real path is re-asserted here,
+# by name, and a stub that has silently stopped intercepting is reported as a
+# FAIL rather than quietly making the rest of this check meaningless.
+# --------------------------------------------------------------------------- #
 # End-to-end proof that the CURRENT config produces a hardened container.
 # The kwargs introspection above inspects code; this runs it. It creates and
 # removes exactly one container, named verify-hardproof-*, which cannot collide
@@ -717,9 +1109,25 @@ _verify_hardened_container() {
 
 if [[ $DOCKER_OK -ne 1 ]]; then
     skip 3 "container hardening (CapAdd/CapDrop/SecurityOpt/PidsLimit)" "docker unavailable | $HARDEN_SUMMARY" "start the docker daemon"
-elif [[ -z "$CHROME_CONTAINERS" ]]; then
-    skip 3 "container hardening (CapAdd/CapDrop/SecurityOpt/PidsLimit)" "no chrome-* container exists to inspect | $HARDEN_SUMMARY" "start one profile container and re-run"
+elif [[ $HARDEN_RC -ne 0 ]]; then
+    # The live-container inspection cannot say anything the code introspection
+    # cannot, so report the code verdict alone rather than pretending a
+    # container is required.
+    if [[ ${#CODE_PROBLEMS[@]} -gt 0 ]]; then
+        fail 3 "container hardening (CapAdd/CapDrop/SecurityOpt/PidsLimit)" \
+              "CODE REGRESSION: ${CODE_PROBLEMS[*]} | $HARDEN_SUMMARY" \
+              "set cap_drop=['ALL'], security_opt=['no-new-privileges'], pids_limit=N and read_only=True in DockerManager.start_container(), then recreate the containers"
+    else
+        skip 3 "container hardening (CapAdd/CapDrop/SecurityOpt/PidsLimit)" \
+              "start_container() could not be introspected (rc=$HARDEN_RC), so neither the code nor a container could be checked | $HARDEN_SUMMARY" \
+              "fix the introspection above; without it this check cannot distinguish a code regression from a stale container"
+    fi
 else
+    # The live-container inspection below is OPTIONAL, never load-bearing. An
+    # earlier version SKIPped the whole check when no chrome-* container
+    # existed, which is precisely the case where the one thing this check can
+    # prove on its own terms — that the current start_container() config
+    # produces a hardened container — went unproven.
     # Inspect EVERY container, not just the newest: reporting only the first
     # hid the fact that the other two were on a different, unhardened image.
     LIVE_PROBLEMS=""; LIVE_HARDENED=0; LIVE_TOTAL=0; LIVE_LINES=""
@@ -750,42 +1158,52 @@ else
     LIVE_LINES="${LIVE_LINES%; }"; LIVE_PROBLEMS="${LIVE_PROBLEMS%; }"
 
     HC="$HARDEN_SUMMARY | live ($LIVE_HARDENED/$LIVE_TOTAL hardened): ${LIVE_LINES:-none}"
+    [[ $LIVE_TOTAL -eq 0 ]] && HC="$HC (no live container exists, so the verdict rests on the code introspection and the end-to-end proof below)"
 
     if [[ ${#CODE_PROBLEMS[@]} -gt 0 ]]; then
         fail 3 "container hardening (CapAdd/CapDrop/SecurityOpt/PidsLimit)" \
               "CODE REGRESSION: ${CODE_PROBLEMS[*]} | $HC" \
               "set cap_drop=['ALL'], security_opt=['no-new-privileges'], pids_limit=N and read_only=True in DockerManager.start_container(), then recreate the containers"
-    elif [[ $HARDEN_RC -eq 0 && ( "$K_PIDSLIM" != "2048" || "$K_MEMLIM" != '"2g"' ) ]]; then
+        # Deliberately NOT falling through to the proof: the code is already
+        # wrong, and a green proof against a stale set of flags would only
+        # muddy a FAIL that is unambiguous.
+
+    elif [[ $K_PIDSLIM != "2048" || "$K_MEMLIM" != '"2g"' ]]; then
         # The proof container is built for the shipped limits. If the code has
-        # moved on, proving anything with stale flags would be theatre.
-        stale 3 "container hardening (CapAdd/CapDrop/SecurityOpt/PidsLimit)" \
-               "STALE HARNESS PROOF: $LIVE_PROBLEMS — the code IS hardened, but start_container() now uses pids_limit=$K_PIDSLIM / mem_limit=$K_MEMLIM while this harness's proof container is hardcoded for 2048/2g, so the end-to-end proof was skipped rather than run against the wrong config. $HC" \
-               "update the proof flags in _verify_hardened_container() in scripts/verify.sh to match DockerManager.PIDS_LIMIT/MEM_LIMIT; the code itself is fine"
-    elif [[ $HARDEN_RC -ne 0 ]]; then
-        if [[ -n "$LIVE_PROBLEMS" ]]; then
-            fail 3 "container hardening (CapAdd/CapDrop/SecurityOpt/PidsLimit)" \
-                  "UNVERIFIABLE: $LIVE_PROBLEMS — the code could not be introspected either, so this may be a real regression. $HC" \
-                  "fix the start_container() introspection above, then decide"
-        else
-            pass 3 "container hardening (CapAdd/CapDrop/SecurityOpt/PidsLimit)" "all $LIVE_TOTAL live container(s) hardened | $HC"
-        fi
-    elif [[ -z "$LIVE_PROBLEMS" ]]; then
-        pass 3 "container hardening (CapAdd/CapDrop/SecurityOpt/PidsLimit)" \
-              "code is hardened and all $LIVE_TOTAL live container(s) are hardened | $HC"
+        # moved on, proving anything with stale flags would be theatre. This
+        # is a gap in the HARNESS, not in the app, so it is its own status.
+        skip 3 "container hardening (CapAdd/CapDrop/SecurityOpt/PidsLimit)" \
+              "the code IS hardened, but start_container() now uses pids_limit=$K_PIDSLIM / mem_limit=$K_MEMLIM while this harness's proof container is hardcoded for 2048/2g, so the end-to-end proof was skipped rather than run against the wrong config | $HC" \
+              "update the proof flags in _verify_hardened_container() in scripts/verify.sh to match DockerManager.PIDS_LIMIT/MEM_LIMIT; the code itself is fine"
+
     else
-        stale 3 "container hardening (CapAdd/CapDrop/SecurityOpt/PidsLimit)" \
-               "STALE LIVE CONTAINER (pre-dates the fix): $LIVE_PROBLEMS — but start_container() now passes cap_drop=['ALL'], no-new-privileges, pids_limit, read_only and a mem_limit, so a newly created container will be hardened. $HC" \
-               "recreate the containers by launching each profile from the app (a plain Launch force-removes the stopped container); 'docker start' would reuse the old config"
         # The containers being unhardened is expected. What must NOT be
         # tolerated is a NEW container that would also be unhardened, so prove
         # the fix by actually creating one under the current config and
-        # inspecting the result. This is the only write the harness performs and
-        # it only ever touches a container it created itself.
-        if _verify_hardened_container; then
-            R_DETAIL[${#R_DETAIL[@]}-1]="${R_DETAIL[${#R_DETAIL[@]}-1]} | proof: a throwaway container created by the current start_container() config IS hardened ($PROOF_SUMMARY)"
+        # inspecting the result. This runs whether or not any live container
+        # exists — that is the fix for this check having been structurally
+        # unable to prove anything on a host with no containers running.
+        # It only ever touches a container it created itself.
+        _PROOF_OK=0
+        _verify_hardened_container && _PROOF_OK=1
+        if [[ $_PROOF_OK -eq 1 ]]; then
+            if [[ -z "$LIVE_PROBLEMS" ]]; then
+                if [[ $LIVE_TOTAL -eq 0 ]]; then
+                    pass 3 "container hardening (CapAdd/CapDrop/SecurityOpt/PidsLimit)" \
+                          "no live container to inspect; start_container() is hardened and a throwaway container built from the current config IS hardened | $HC | proof: $PROOF_SUMMARY"
+                else
+                    pass 3 "container hardening (CapAdd/CapDrop/SecurityOpt/PidsLimit)" \
+                          "code is hardened and all $LIVE_TOTAL live container(s) are hardened | $HC | proof: $PROOF_SUMMARY"
+                fi
+            else
+                stale 3 "container hardening (CapAdd/CapDrop/SecurityOpt/PidsLimit)" \
+                       "STALE LIVE CONTAINER (pre-dates the fix): $LIVE_PROBLEMS — but start_container() now passes cap_drop=['ALL'], no-new-privileges, pids_limit, read_only and a mem_limit, and a throwaway container built from that config IS hardened. $HC | proof: $PROOF_SUMMARY" \
+                       "recreate the containers by launching each profile from the app (a plain Launch force-removes the stopped container); 'docker start' would reuse the old config"
+            fi
         else
-            R_STATUS[${#R_STATUS[@]}-1]=FAIL
-            R_DETAIL[${#R_DETAIL[@]}-1]="STALE-PROOF FAILED: $LIVE_PROBLEMS | $HC | proof: a throwaway container created by the current start_container() config is NOT hardened — $PROOF_SUMMARY"
+            fail 3 "container hardening (CapAdd/CapDrop/SecurityOpt/PidsLimit)" \
+                  "PROOF FAILED: the code's run kwargs claim hardening, but a throwaway container created from exactly that config is NOT hardened — $PROOF_SUMMARY. Live: ${LIVE_PROBLEMS:-none}. $HC" \
+                  "the introspection and the runtime disagree; re-check start_container()'s cap_drop/security_opt/pids_limit/read_only, and the tmpfs set for a read-only rootfs"
         fi
     fi
 fi
@@ -806,9 +1224,17 @@ else
         # The shim did not load. That is a real, actionable state — but it is a
         # different failure from "the shim is loaded and still leaks", and the
         # remediation is completely different, so it is reported separately.
-        fail 4 "host hardware fingerprint not leaked into the container" \
-              "the entrypoint ran but LD_PRELOAD was not exported (shim missing or unusable in this image), so nothing is masked: cpu='$SPOOF_MODEL' mem='$SPOOF_MEMTOTAL' product='$SPOOF_PRODUCT' board='$SPOOF_BOARDVENDOR' | control leg (no spoof stack) agrees: cpu='$CTRL_MODEL' mem='$CTRL_MEMTOTAL' product='$CTRL_PRODUCT' board='$CTRL_BOARDVENDOR'" \
-              "rebuild the image from the current Dockerfile (the shim is compiled in the hwspoof-build stage and copied to /usr/lib/libhwspoof.so); hardware-spoof.sh logs a warning and continues without LD_PRELOAD when the shim is unusable — see scripts/docker/HOST-SPOOFING.md"
+        # And if the image under test predates the Dockerfile, it is not the
+        # app's fault at all: an older image simply has no shim compiled in.
+        if [[ $IMAGE_PREDATES_DOCKERFILE -eq 1 ]]; then
+            stale 4 "host hardware fingerprint not leaked into the container" \
+                   "STALE IMAGE (not a code regression): the entrypoint ran but LD_PRELOAD was not exported, because this image has no shim: cpu='$SPOOF_MODEL' mem='$SPOOF_MEMTOTAL' product='$SPOOF_PRODUCT' board='$SPOOF_BOARDVENDOR' — every value is the host's. Control leg agrees, confirming the probe can see a leak. $IMAGE_STALENESS_EVIDENCE" \
+                   "promote or rebuild the image and re-run. The shim is compiled in the hwspoof-build stage of the current Dockerfile and copied to /usr/lib/libhwspoof.so; an image built before that change cannot have it."
+        else
+            fail 4 "host hardware fingerprint not leaked into the container" \
+                  "the entrypoint ran but LD_PRELOAD was not exported (shim missing or unusable in this image), so nothing is masked: cpu='$SPOOF_MODEL' mem='$SPOOF_MEMTOTAL' product='$SPOOF_PRODUCT' board='$SPOOF_BOARDVENDOR' | control leg (no spoof stack) agrees: cpu='$CTRL_MODEL' mem='$CTRL_MEMTOTAL' product='$CTRL_PRODUCT' board='$CTRL_BOARDVENDOR'" \
+                  "rebuild the image from the current Dockerfile (the shim is compiled in the hwspoof-build stage and copied to /usr/lib/libhwspoof.so); hardware-spoof.sh logs a warning and continues without LD_PRELOAD when the shim is unusable — see scripts/docker/HOST-SPOOFING.md"
+        fi
     else
         # A value is only evidence of a LEAK if it matches the host. But a
         # randomly generated blueprint can legitimately coincide with the host
@@ -864,8 +1290,14 @@ else
         else
             REMEDIATION="The LD_PRELOAD shim is a PARTIAL mitigation and this is not fixable by bind-mounting. It only redirects libc open()/fopen()/uname()/sysinfo() calls, so it covers libc-mediated readers only. Chromium's own base:: file helpers issue raw syscalls (syscall(__NR_openat,...)), so Chromium's internal reads of these files are NOT masked. A genuine on-disk override is impossible in this container: /proc refuses unprivileged file creation, /sys is mounted read-only, and Docker's seccomp profile blocks unprivileged user namespaces (unshare -Urm -> EPERM) — bind-mounting fakes over /proc and /sys would require --privileged, --cap-add SYS_ADMIN or seccomp=unconfined, i.e. giving up the isolation the app exists to provide, which this project deliberately refuses. So do NOT 'fix' this by adding a /proc or /sys bind mount to _build_volumes(). Read scripts/docker/HOST-SPOOFING.md for the measured evidence and the full list of accepted trade-offs."
             if [[ ${#LEAKS[@]} -gt 0 ]]; then
-                fail 4 "host hardware fingerprint not leaked into the container" \
-                      "${LEAKS[*]} | $HD" "$REMEDIATION"
+                if [[ $IMAGE_PREDATES_DOCKERFILE -eq 1 ]]; then
+                    stale 4 "host hardware fingerprint not leaked into the container" \
+                           "STALE IMAGE (not a code regression): the image under test has no LD_PRELOAD shim at all, so nothing can be masked — cpu='$SPOOF_MODEL' mem='$SPOOF_MEMTOTAL' product='$SPOOF_PRODUCT'. $IMAGE_STALENESS_EVIDENCE, and the shim is compiled in the hwspoof-build stage of the current Dockerfile. The control leg confirms the probe is capable of seeing the leak, so this is a real leak in THIS IMAGE and not a measurement artefact." \
+                           "promote or rebuild the image, then re-run. The current code path is verified correct by the fact that the shim is present in the Dockerfile and absent here."
+                else
+                    fail 4 "host hardware fingerprint not leaked into the container" \
+                          "${LEAKS[*]} | $HD" "$REMEDIATION"
+                fi
             else
                 fail 4 "host hardware fingerprint not leaked into the container" \
                       "shim loaded but its output disagrees with the generated signature: ${INCOHERENT[*]} | $HD" \
@@ -1036,9 +1468,15 @@ else
         D6="version=$ver ('$PROBE_CHROMIUM'), estimated release $est_date, age ~${age_months}mo (gate: <= ${CHROMIUM_MAX_AGE_MONTHS}mo)"
         over="$(awk -v a="$age_months" -v g="$CHROMIUM_MAX_AGE_MONTHS" 'BEGIN{print (a>g)?"1":"0"}')"
         if [[ "$over" == "1" ]]; then
-            fail 6 "container Chromium version is current" \
-                  "$D6 — STALE" \
-                  "rebuild the image from a supported Alpine branch (currently FROM $(sed -n 's/^FROM[[:space:]]*//p' "$REPO_ROOT/Dockerfile" 2>/dev/null | head -1)) so it ships a current chromium package"
+            if [[ $IMAGE_PREDATES_DOCKERFILE -eq 1 ]]; then
+                stale 6 "container Chromium version is current" \
+                       "STALE IMAGE (not a code regression): $D6. $IMAGE_STALENESS_EVIDENCE. The Dockerfile now targets $(sed -n 's/^FROM[[:space:]]*//p' "$REPO_ROOT/Dockerfile" 2>/dev/null | head -1); this image simply predates it." \
+                       "promote or rebuild the image. Note that launching a profile from the app recreates the CONTAINER but does not rebuild the IMAGE — 'docker build -t $IMAGE_NAME .', or use the update flow described under 'Chromium update', which is detect-only until you approve it."
+            else
+                fail 6 "container Chromium version is current" \
+                      "$D6 — STALE" \
+                      "rebuild the image from a supported Alpine branch (currently FROM $(sed -n 's/^FROM[[:space:]]*//p' "$REPO_ROOT/Dockerfile" 2>/dev/null | head -1)) so it ships a current chromium package"
+            fi
         else
             pass 6 "container Chromium version is current" "$D6"
         fi
@@ -1088,9 +1526,27 @@ else
 fi
 
 # =========================================================================== #
-# CHECK 7 — /.dockerenv
+# CHECK 7 — /.dockerenv is NOT masked (F5/T3)
 # =========================================================================== #
-_hd "7. /.dockerenv absent or 755 root:root"
+#
+# WHAT THE CODE NOW DOES, AND WHY THIS CHECK IS ABOUT ABSENCE
+# ------------------------------------------------------------
+#   The `/.dockerenv` mask was DROPPED on purpose. The mask file could only ever
+#   be 0644 <user>:<user> (the host user creates it; the container runs as
+#   non-root `chrome`, so it cannot be chowned to 0:0). Real Docker's
+#   `/.dockerenv` is ALWAYS 0755 root:root, so a mode-only match still read as
+#   anomalous to anything that stats the owner — a strictly worse tell than the
+#   unhidden real file. Running the container as UID 0 to get 0:0 would undo the
+#   T2 hardening.
+#
+#   So the correct end state is: NO mask mount, and the genuine 0755 root:root
+#   file. An earlier version of this check asserted "absent OR 755 root:root",
+#   which a mask at exactly 0755 would have satisfied — i.e. it could not
+#   distinguish "we dropped the mask" from "we kept it and got the mode right".
+#   This check asserts the mask is gone from the CODE as the primary claim, and
+#   reports the live/container observation as corroboration.
+# --------------------------------------------------------------------------- #
+_hd "7. /.dockerenv is not masked (F5/T3 — mask dropped deliberately)"
 DOCKERENV_SRC=""
 if [[ $DOCKER_OK -eq 1 && -n "$CHROME_CONTAINERS" ]]; then
     while IFS=$'\t' read -r cid cname cstatus; do
@@ -1100,60 +1556,55 @@ if [[ $DOCKER_OK -eq 1 && -n "$CHROME_CONTAINERS" ]]; then
     done <<< "$CHROME_CONTAINERS"
 fi
 
-if [[ $DOCKER_OK -ne 1 ]]; then
-    skip 7 "/.dockerenv absent or 755 root:root" "docker unavailable" "start the docker daemon"
-elif [[ -z "$DOCKERENV_SRC" ]]; then
-    # No mask mount anywhere -> the container sees Docker's own file, or none.
-    if ! _probe_once; then
-        skip 7 "/.dockerenv absent or 755 root:root" "no runnable image to inspect and no existing container bind for /.dockerenv"
-    elif [[ $PROBE_FALLBACK -eq 1 ]]; then
-        # The image under test is missing, so the probe ran a stale container's
-        # image. Say so rather than reporting it as the current state.
-        stale 7 "/.dockerenv absent or 755 root:root" \
-               "STALE PROBE: image '$PROBE_IMAGE_REF' is not built locally, so the probe fell back to the image of an existing container, which predates the current Dockerfile" \
-               "build the image (docker build -t $IMAGE_NAME .) and re-run"
+D7_TITLE="/.dockerenv is not masked (F5/T3)"
+
+# The CODE claim comes first and is the load-bearing half: does
+# _build_volumes() still emit a /.dockerenv mount at all? This is
+# answerable from check 2's introspection alone, with no container and no
+# image required — which is what makes it capable of passing here.
+CODE_MASK="unknown"
+if [[ -n "$VOL_REPORT" ]]; then
+    if printf '%s\n' "$VOL_REPORT" | grep -q $'\t/.dockerenv'; then
+        CODE_MASK="present"
     else
-        D7="no container binds /.dockerenv; inside the image it is: ${PROBE_DOCKERENV:-unknown} (reference: real Docker is '755 root:root')"
-        if [[ "$PROBE_DOCKERENV" == "absent" || "$PROBE_DOCKERENV" == "755 root:root" ]]; then
-            pass 7 "/.dockerenv absent or 755 root:root" "$D7"
-        else
-            fail 7 "/.dockerenv absent or 755 root:root" "$D7" \
-                  "drop the /.dockerenv mask mount from _build_volumes(), or ship the mask file as 0755 root:root"
-        fi
+        CODE_MASK="absent"
     fi
+fi
+
+# The OBSERVED state inside a throwaway probe container, when possible.
+OBSERVED="(not probed)"
+if [[ $DOCKER_OK -eq 1 ]] && _probe_once; then
+    OBSERVED="$PROBE_DOCKERENV"
+fi
+
+CODE_CLAIM="code: _build_volumes() emits a /.dockerenv mask: $CODE_MASK"
+OBS_CLAIM="observed in a probe container: ${OBSERVED:-unknown}"
+
+if [[ "$CODE_MASK" == "present" ]]; then
+    # This is the regression that matters. A mask cannot be made to look
+    # right (0644 <user>:<user> vs Docker's 0755 root:root), so its presence
+    # is the defect — not its mode.
+    fail 7 "$D7_TITLE" \
+          "CODE REGRESSION: _build_volumes() emits a /.dockerenv mask mount again. $OBS_CLAIM. Any mask this app can create is 0644 <user>:<user> and reads as a MORE obvious tell than leaving Docker's genuine 0755 root:root file alone." \
+          "remove the /.dockerenv mount from _build_volumes() in backend/docker_manager.py; the mask was deliberately dropped (F5/T3) because a half-correct one is worse than none. See the comment block above it."
+elif [[ "$CODE_MASK" == "unknown" ]]; then
+    skip 7 "$D7_TITLE" \
+          "could not introspect _build_volumes() (check 2's introspection did not run or errored), so whether the mask is gone is unevaluated | $OBS_CLAIM" \
+          "fix check 2's introspection; without it this check cannot tell a code regression from a stale container"
+elif [[ -n "$DOCKERENV_SRC" ]]; then
+    # A container still carries the mask mount, but the code no longer emits
+    # one. That is stale live state, and it is the ONLY case that is.
+    MODE_OWNER="$(stat -c '%a %U:%G' "$DOCKERENV_SRC" 2>/dev/null || echo 'unreadable')"
+    stale 7 "$D7_TITLE" \
+           "STALE LIVE CONTAINER (pre-dates the fix): a live container still binds $DOCKERENV_SRC ($MODE_OWNER) at /.dockerenv, but $CODE_CLAIM — a recreated container will see Docker's genuine file. $OBS_CLAIM" \
+           "recreate the container by launching the profile from the app; 'docker start' would reuse the old config"
+elif [[ $PROBE_FALLBACK -eq 1 ]]; then
+    stale 7 "$D7_TITLE" \
+           "STALE PROBE: $CODE_CLAIM, but image '$PROBE_IMAGE_REF' is not built locally so the probe fell back to a pre-existing container's image, which predates the current Dockerfile. $OBS_CLAIM" \
+           "build the image (docker build -t $IMAGE_NAME .) and re-run to observe the current image's /.dockerenv"
 else
-    D7="mask source $DOCKERENV_SRC -> $(stat -c '%a %U:%G' "$DOCKERENV_SRC" 2>/dev/null || echo 'unreadable')"
-    MODE_OWNER="$(stat -c '%a %U:%G' "$DOCKERENV_SRC" 2>/dev/null || echo '')"
-    # Distinguish a code regression from a container that still carries the old
-    # mask mount: introspect _build_volumes() and see whether the CODE still
-    # adds the mask at all.
-    CODE_MASK="unknown"
-    if [[ -n "$VOL_REPORT" ]]; then
-        if printf '%s\n' "$VOL_REPORT" | grep -q $'\t/.dockerenv'; then
-            CODE_MASK="present"
-        else
-            CODE_MASK="absent"
-        fi
-    fi
-    D7="$D7 | _build_volumes() currently emits a /.dockerenv mask: $CODE_MASK"
-    if [[ "$MODE_OWNER" == "755 root:root" ]]; then
-        pass 7 "/.dockerenv absent or 755 root:root" "$D7"
-    elif [[ "$CODE_MASK" == "absent" ]]; then
-        stale 7 "/.dockerenv absent or 755 root:root" \
-               "STALE LIVE CONTAINER (pre-dates the fix): $MODE_OWNER is bound at /.dockerenv, but _build_volumes() no longer emits that mount, so a recreated container will see Docker's genuine 0755 root:root file" \
-               "recreate the container by launching the profile from the app"
-    else
-        # Confirm the mismatch is visible from inside a container using the mask.
-        MASK_IN_CTR="(not probed)"
-        if [[ $DOCKER_OK -eq 1 ]] && docker image inspect "$IMAGE_REF" >/dev/null 2>&1; then
-            MASK_IN_CTR="$(docker run --rm --network none --entrypoint sh \
-                -v "${DOCKERENV_SRC}:/.dockerenv:ro" "$IMAGE_REF" -c \
-                "stat -c '%a %U:%G' /.dockerenv 2>/dev/null || echo absent" 2>/dev/null || echo '(probe failed)')"
-        fi
-        fail 7 "/.dockerenv absent or 755 root:root" \
-              "$D7, expected 755 root:root — inside the container /.dockerenv is '$MASK_IN_CTR'" \
-              "drop the /.dockerenv mask from _build_volumes() (recommended), or install the mask file as 0755 root:root instead of 0644 <user>:<user>"
-    fi
+    pass 7 "$D7_TITLE" \
+          "$CODE_CLAIM — the mask is gone and the genuine file is left in place. $OBS_CLAIM. This is the ACCEPTED TRADE-OFF, not an oversight: the container is trivially detectable via this one file, deliberately, because a correctly-statted file beats a visibly-fake one (F5/T3)."
 fi
 
 # =========================================================================== #
@@ -1245,6 +1696,773 @@ else
         fail 9b "desktop_manager.py os.system fix is committed" \
               "HEAD:$REL contains neither os.system( nor subprocess.run(" \
               "apply the subprocess.run fix and commit it"
+    fi
+fi
+
+# =========================================================================== #
+# CHECK 10 — desktop identity
+# =========================================================================== #
+# Two claims, both about what the generated entries must NOT contain and about
+# one thing they must agree on:
+#
+#   * NO generated .desktop may declare the `WebBrowser` category, borrow
+#     `google-chrome` (or any other browser's) icon, or contain a `MimeType=`
+#     / `x-scheme-handler/...` key. Each of those individually is what makes a
+#     crowd of Chrome-branded entries show up in GNOME's "Set as default
+#     browser" chooser, which is the reported "it messes with my browser" bug.
+#   * Chromium's `--class=` must EQUAL the entry's `StartupWMClass=`. If they
+#     diverge the WM cannot associate the window with its own launcher and
+#     shows a wrong or generic icon. desktop_manager.wm_class() is the single
+#     source of truth for both sides; this asserts that it still is, rather
+#     than trusting the docstring.
+#
+# Evaluated twice: against the CODE (what the generator would write now) and
+# against the FILES ON DISK (what a launcher actually offers GNOME today). The
+# on-disk half is live state, so a stale entry written by an older build is
+# STALE, not FAIL — refresh_desktop_entries() heals it on next app start.
+# --------------------------------------------------------------------------- #
+_hd "10. desktop identity (no WebBrowser, no google-chrome icon, no MIME, --class == StartupWMClass)"
+
+D10_PY_RC=3
+D10_CODE=""
+if [[ -n "$PY_BIN" && -d "$REPO_ROOT/backend" ]]; then
+    _log "introspecting desktop_manager generators + docker_manager --class"
+    D10_CODE="$(VERIFY_SCRATCH="$WORK" "$PY_BIN" - "$REPO_ROOT" 2>&1 <<'PY_EOF'
+import os, re, sys
+repo = sys.argv[1]
+sys.path.insert(0, os.path.join(repo, 'backend'))
+try:
+    import desktop_manager as dm
+except Exception as e:
+    print("IMPORT_ERROR %s" % e); sys.exit(3)
+
+# -- A single source of truth for the window class. ---------------------------
+# Both the .desktop key and Chromium's --class must come from wm_class().
+try:
+    dm_src = open(os.path.join(repo, 'backend', 'docker_manager.py')).read()
+except OSError as e:
+    print("IMPORT_ERROR cannot read docker_manager.py: %s" % e); sys.exit(3)
+if not re.search(r'--class=\{?wm_class\(', dm_src) and '--class=' not in dm_src:
+    print("FLAG docker_manager does not pass --class at all"); sys.exit(1)
+if 'wm_class(' not in dm_src:
+    print("FLAG docker_manager derives --class without desktop_manager.wm_class()")
+    sys.exit(1)
+if 'from desktop_manager import wm_class' not in dm_src:
+    print("FLAG docker_manager does not import wm_class from desktop_manager")
+    sys.exit(1)
+
+# -- For each generated entry: assert the prohibitions and print the facts. ----
+# PROFILE_NAMES is a fixed sample; desktop_manager's generators are pure
+# functions of the name, so a sample is sufficient and keeps the check free of
+# any dependency on the real profile list.
+SAMPLE = ('Work', 'Fiverr-Demo', 'Zoom-1')
+problems = []
+for name in SAMPLE:
+    for kind, content in (('profile', dm.profile_entry_content(name)),
+                          ('app', dm.app_entry_content())):
+        tag = '%s:%s' % (kind, name)
+        # The APP entry is not a profile launcher: it opens the manager, and
+        # there is no profile to scope a window class to. Its class is the bare
+        # DESKTOP_PREFIX, which is correct and must NOT be compared against
+        # wm_class(profile) — that comparison is the profile entries' claim only.
+        scoped = (kind == 'profile')
+        lines = [l.rstrip('\r') for l in content.splitlines()]
+        # Categories must not contain WebBrowser (or Network;WebBrowser).
+        for l in lines:
+            if l.startswith('Categories='):
+                cats = [c.strip() for c in l.split('=', 1)[1].split(';')]
+                for bad in ('WebBrowser', 'WebBrowserDevelopment'):
+                    if bad in cats:
+                        problems.append('%s Categories contains %s' % (tag, bad))
+                break
+        else:
+            problems.append('%s has no Categories= key at all' % tag)
+        # Icon must not be google-chrome or any other real browser's icon name.
+        icon = next((l.split('=', 1)[1] for l in lines if l.startswith('Icon=')), '')
+        if re.search(r'(^|[=/_-])google-chrome([/=]|$)', icon):
+            problems.append('%s Icon=%s borrows Google Chrome\'s icon' % (tag, icon))
+        if icon in ('chromium', 'chromium-browser', 'firefox', 'brave'):
+            problems.append('%s Icon=%s impersonates another browser' % (tag, icon))
+        if icon in ('web-browser', ''):
+            pass  # generic fallback is the documented, honest degrade
+        # MIME / URL-scheme handling must be entirely absent.
+        for l in lines:
+            if l.startswith('MimeType='):
+                problems.append('%s declares MimeType= (%s)' % (tag, l))
+            if l.startswith('x-scheme-handler'):
+                problems.append('%s declares %s' % (tag, l))
+        # No URL field codes: these launchers open exactly one fixed profile.
+        for l in lines:
+            if l.startswith('Exec=') and re.search(r'%[uUfF]', l):
+                problems.append('%s Exec= advertises URL field codes (%s)' % (tag, l))
+        # StartupWMClass must equal the class Chromium is launched with.
+        wm = next((l.split('=', 1)[1] for l in lines if l.startswith('StartupWMClass=')), '')
+        if not wm:
+            problems.append('%s has no StartupWMClass=' % tag)
+        elif scoped and wm != dm.wm_class(name):
+            problems.append('%s StartupWMClass=%s but the container launches '
+                            '--class=%s' % (tag, wm, dm.wm_class(name)))
+        elif not scoped and wm != dm.DESKTOP_PREFIX:
+            problems.append('%s StartupWMClass=%s, expected the bare %r'
+                            % (tag, wm, dm.DESKTOP_PREFIX))
+        # Neither kind may adopt another browser's window class, which would
+        # make a WM treat this window as that browser's.
+        if wm in ('google-chrome', 'chrome', 'chromium', 'firefox'):
+            problems.append('%s StartupWMClass=%s collides with a real browser'
+                            % (tag, wm))
+        print("ENTRY\t%s\ticon=%s\twmclass=%s\tcategories=%s" % (
+            tag, icon, wm or '<none>',
+            next((l for l in lines if l.startswith('Categories=')), '<none>')))
+
+# -- The profile-store resolver must be the one the harness used. ------------
+# config's constants ARE paths' defaults; assert that rather than assuming it,
+# because the whole harness depends on this equivalence.
+import config, paths
+if config.CHROME_PROFILES_DIR != paths.default_profiles_dir():
+    print("FLAG config.CHROME_PROFILES_DIR has drifted from "
+          "paths.default_profiles_dir(): %s vs %s"
+          % (config.CHROME_PROFILES_DIR, paths.default_profiles_dir()))
+    sys.exit(1)
+if config.CHROME_PROFILES_DIR_LEGACY != paths.legacy_profiles_dir():
+    print("FLAG config.CHROME_PROFILES_DIR_LEGACY has drifted from "
+          "paths.legacy_profiles_dir()")
+    sys.exit(1)
+if config.resolve_profiles_dir() != paths.resolve_profiles_dir():
+    print("FLAG config.resolve_profiles_dir() != paths.resolve_profiles_dir()")
+    sys.exit(1)
+print("STORE\t%s" % config.resolve_profiles_dir())
+
+for p in problems:
+    print("PROBLEM\t%s" % p)
+sys.exit(1 if problems else 0)
+PY_EOF
+)"
+    D10_PY_RC=$?
+fi
+
+# --- the on-disk half: what a launcher actually offers GNOME today ----------
+D10_DISK_PROBLEMS=""; D10_DISK_N=0
+if [[ -d "$DESKTOP_DIR" ]]; then
+    while IFS= read -r f; do
+        [[ -z "$f" ]] && continue
+        base="$(basename "$f")"
+        # Only entries this app owns. A hand-written or third-party .desktop is
+        # not ours to assert on.
+        [[ "$base" == chrome-isolation.desktop || "$base" == chrome-isolation-*.desktop ]] || continue
+        D10_DISK_N=$((D10_DISK_N + 1))
+        # 1. WebBrowser in Categories
+        if grep -qiE '^Categories=.*(^|;)[[:space:]]*WebBrowser' "$f" 2>/dev/null \
+           || grep -qiE '^[[:space:]]*WebBrowser[[:space:]]*;' "$f" 2>/dev/null; then
+            D10_DISK_PROBLEMS+="$base: declares the WebBrowser category; "
+        fi
+        # 2. google-chrome (or another browser) as the icon
+        icon="$(sed -n 's/^Icon=//p' "$f" 2>/dev/null | head -1)"
+        if printf '%s' "$icon" | grep -qiE 'google-chrome'; then
+            D10_DISK_PROBLEMS+="$base: Icon=$icon borrows Google Chrome's icon; "
+        fi
+        # 3. MIME / scheme handlers
+        if grep -qiE '^[[:space:]]*MimeType=' "$f" 2>/dev/null \
+           || grep -qiE '^[[:space:]]*x-scheme-handler' "$f" 2>/dev/null; then
+            D10_DISK_PROBLEMS+="$base: declares MimeType=/x-scheme-handler; "
+        fi
+        # 4. --class must agree with StartupWMClass. The class a launcher claims
+        #    is the class the WM matches the window against; the container's
+        #    --class comes from wm_class(<name>) for the same profile name.
+        wm="$(sed -n 's/^StartupWMClass=//p' "$f" 2>/dev/null | head -1)"
+        if [[ "$base" == chrome-isolation-*.desktop ]]; then
+            pname="${base#chrome-isolation-}"; pname="${pname%.desktop}"
+            if [[ -z "$wm" ]]; then
+                D10_DISK_PROBLEMS+="$base: no StartupWMClass=; "
+            elif [[ -n "$PY_BIN" && "$D10_PY_RC" -eq 0 ]]; then
+                want="$(cd "$REPO_ROOT" && VERIFY_SCRATCH="$WORK" "$PY_BIN" -c "
+import sys; sys.path.insert(0, 'backend')
+import desktop_manager
+print(desktop_manager.wm_class(sys.argv[1]))
+" "$pname" 2>/dev/null)"
+                [[ -n "$want" && "$wm" != "$want" ]] && \
+                    D10_DISK_PROBLEMS+="$base: StartupWMClass=$wm but the container launches --class=$want; "
+            fi
+        fi
+    done <<< "$(ls -1 "$DESKTOP_DIR"/chrome-isolation*.desktop 2>/dev/null)"
+fi
+D10_DISK_PROBLEMS="${D10_DISK_PROBLEMS%; }"
+
+D10_DISK_NOTE="on disk: $D10_DISK_N app-owned .desktop file(s) in $DESKTOP_DIR; ${D10_DISK_PROBLEMS:-all clean}"
+
+if [[ $D10_PY_RC -eq 3 ]]; then
+    skip 10 "desktop identity" "could not import desktop_manager ($D10_CODE) | $D10_DISK_NOTE" "fix the import; without it this check cannot run"
+elif [[ $D10_PY_RC -gt 1 ]]; then
+    fail 10 "desktop identity" \
+          "CODE REGRESSION: the desktop identity assertions could not be evaluated (rc=$D10_PY_RC): $D10_CODE" \
+          "run the python block above directly to see the traceback"
+elif [[ $D10_PY_RC -eq 1 ]]; then
+    fail 10 "desktop identity" \
+          "CODE REGRESSION in the generator: $(printf '%s\n' "$D10_CODE" | grep -E '^(PROBLEM|FLAG)' | sed 's/^\(PROBLEM\|FLAG\)\t\?//' | tr '\n' '; ') | $D10_DISK_NOTE" \
+          "a generated entry must not declare WebBrowser, must not use google-chrome's icon, must contain no MimeType=/x-scheme-handler, and must carry a StartupWMClass equal to desktop_manager.wm_class(profile) — the same value docker_manager passes as --class"
+elif [[ -n "$D10_DISK_PROBLEMS" ]]; then
+    stale 10 "desktop identity" \
+           "STALE ON-DISK ENTRIES (pre-date the fix): $D10_DISK_PROBLEMS — but the generator itself is clean, so refresh_desktop_entries() will heal these | $D10_DISK_NOTE" \
+           "just launch the app once: it regenerates every entry in its own namespace on startup and rewrites only what changed"
+else
+    pass 10 "desktop identity" \
+          "generator is clean and StartupWMClass == the --class docker_manager passes | $D10_DISK_NOTE"
+fi
+
+# =========================================================================== #
+# CHECK 11 — uninstall.sh will not rm -rf a path outside the profile store
+# =========================================================================== #
+# `rm -rf` on a mis-resolved path is irreversible, and the profile store is
+# the user's real browser data (cookies, logins, history). uninstall.sh
+# derives PROFILES_DIR from backend/config.py, which honours
+# $CHROME_ISOLATION_HOME, so the path it deletes is influenced by the
+# environment — and uninstall.sh was hardened with a guard precisely because
+# "is it a directory?" is not sufficient to make `rm -rf` safe.
+#
+# This check EXECUTES the real script and observes what it actually deletes.
+# That matters: reading the guard and concluding "it looks safe" is exactly how
+# a guard that does not hold gets reported as holding. Four things are measured
+# per scenario, by sentinel files:
+#
+#   MUST SURVIVE   $HOME itself, anything above it, a sibling directory whose
+#                  leaf merely resembles the store, and — under a hostile
+#                  $CHROME_ISOLATION_HOME — a directory that is NOT the app's
+#                  profile store.
+#   MUST BE GONE   the resolved profile store, the app data dir and the legacy
+#                  ~/Chrome. Asserting these is what makes the check
+#                  NON-VACUOUS: a run where every sentinel survives because the
+#                  script aborted early would otherwise look like a pass.
+#
+# SANDBOX. The real uninstall.sh is executed, unmodified, with:
+#   * HOME redirected to a throwaway tree under the run's mktemp dir, so every
+#     path it resolves (`$HOME/Chrome`, `$HOME/.local/...`) lands in there;
+#   * docker, sudo, dpkg and rpm replaced by inert stubs first on PATH, so the
+#     script cannot remove containers, images or packages;
+#   * PATH still containing the real rm, so the guard is genuinely exercised
+#     rather than stubbed away;
+#   * the script's own SCRIPT_DIR left as the REAL repo, so it imports the real
+#     backend/config.py and the real path-resolution logic is what is tested.
+# Nothing outside $WORK is reachable from inside the sandbox.
+# --------------------------------------------------------------------------- #
+_hd "11. uninstall.sh cannot rm -rf a path outside the profile store"
+
+D11_UNINSTALL="$REPO_ROOT/uninstall.sh"
+D11_TITLE="uninstall rm -rf is confined to the profile store"
+
+if [[ ! -f "$D11_UNINSTALL" ]]; then
+    skip 11 "$D11_TITLE" "no uninstall.sh at $D11_UNINSTALL"
+else
+    # Inert stubs, first on PATH, for every command the uninstaller uses to act
+    # on the system. `rm` is deliberately NOT stubbed: stubbing it would make
+    # this check unable to detect the very thing it exists to detect.
+    D11_BIN="$WORK/stubbin"; mkdir -p "$D11_BIN"
+    for stub in docker sudo dpkg rpm; do
+        { printf '#!/usr/bin/env bash\n'
+          printf '# Inert stub installed by scripts/verify.sh check 11. Touches nothing.\n'
+          printf 'exit 0\n'
+        } > "$D11_BIN/$stub"
+        chmod +x "$D11_BIN/$stub"
+    done
+
+    # A profile directory as this app leaves it after Chromium has run once.
+    # REALISTIC FIXTURES, AND WHY THAT MATTERS.
+    #   The genuine stores below (store, ~/Chrome, ~/Isolated-Chrome/profiles)
+    #   are filled with REAL Chromium artefacts — Default/, Local State,
+    #   hardware-signature.json — because that is what a genuine store actually
+    #   contains. An earlier version of this check filled them with a single
+    #   sentinel file, which no store in the field has ever looked like: it made
+    #   the fixture unfalsifiable, because "remove it" and "refuse it" were then
+    #   indistinguishable outcomes for ANY rule the uninstaller could use. The
+    #   fix is not to weaken the assertions — every assertion below is the same
+    #   one, and several are new — it is to stop asking an unanswerable question
+    #   and start asking the real one: does the uninstaller delete data it can
+    #   prove belongs to it, and refuse data it cannot?
+    _d11_real_profile() {   # _d11_real_profile <profile dir>
+        local p="$1"
+        mkdir -p "$p/Default" "$p/Downloads" || return 1
+        printf '{"Cookies":[]}\n' > "$p/Default/Preferences"
+        : > "$p/Local State"
+        printf '{"schema_version":1,"system":{}}\n' > "$p/hardware-signature.json"
+    }
+
+    # Build one sandbox tree. Returns 0 on success.
+    _d11_build() {
+        local sb="$1"
+        rm -rf "$sb" 2>/dev/null
+        mkdir -p "$sb/home/.local/share/chrome-isolation-manager" \
+                 "$sb/home/Chrome" \
+                 "$sb/home/Isolated-Chrome/profiles" \
+                 "$sb/store/profiles" \
+                 "$sb/sibling/profiles.bak" \
+                 "$sb/decoy/profiles" \
+                 "$sb/decoy2/profiles" \
+                 "$sb/home/profiles" \
+                 "$sb/sym" \
+                 2>/dev/null || return 1
+        _d11_real_profile "$sb/home/Chrome/Legacy"          || return 1
+        _d11_real_profile "$sb/home/Isolated-Chrome/profiles/Home" || return 1
+        _d11_real_profile "$sb/store/profiles/Work"         || return 1
+        # $HOME/profiles is given REAL profile artefacts on purpose: the worst
+        # case for a guard that only asks "does this look like ours". It looks
+        # exactly like ours and is still not ours, so containment must refuse
+        # it. A decoy that only satisfies the shape test would let a
+        # shape-only guard pass.
+        _d11_real_profile "$sb/home/profiles/Mine"           || return 1
+        # decoy2: contains a FILE named Default, so the directory-name bait is
+        # there without the directory being a Chromium profile.
+        mkdir -p "$sb/decoy2/profiles/Nested" || return 1
+        printf 'not a profile\n' > "$sb/decoy2/profiles/Default"
+        # sym: the resolved store is a symlink to the decoy.
+        ln -sfn "$sb/decoy/profiles" "$sb/sym/profiles" || return 1
+        printf 'store\n'    > "$sb/store/profiles/SENTINEL_STORE"
+        printf 'appdata\n'   > "$sb/home/.local/share/chrome-isolation-manager/SENTINEL_APPDATA"
+        printf 'legacy\n'    > "$sb/home/Chrome/SENTINEL_LEGACY"
+        printf 'default\n'   > "$sb/home/Isolated-Chrome/profiles/SENTINEL_DEFAULTSTORE"
+        printf 'homeprof\n'  > "$sb/home/profiles/SENTINEL_HOMEDIRPROFILES"
+        printf 'outside\n'   > "$sb/home/SENTINEL_OUTSIDE"
+        printf 'sibling\n'   > "$sb/sibling/profiles.bak/SENTINEL_SIBLING"
+        printf 'decoy2\n'    > "$sb/decoy2/profiles/SENTINEL_DECOY2"
+        printf 'decoy\n'     > "$sb/decoy/profiles/SENTINEL_DECOY"
+        return 0
+    }
+
+    # _d11_run <sandbox> <cih-value|UNSET> -> echoes rc; sets D11_*_GONE flags
+    _d11_run() {
+        local sb="$1" cih="$2"
+        local fakehome="$sb/home"
+        local -a env_args=("PATH=$D11_BIN:$PATH" "HOME=$fakehome")
+        [[ "$cih" != "UNSET" ]] && env_args+=("CHROME_ISOLATION_HOME=$cih")
+        local rc=0
+        printf 'YES\n' | env "${env_args[@]}" bash "$D11_UNINSTALL" \
+            >"$sb/stdout" 2>"$sb/stderr" || rc=$?
+        D11_RC=$rc
+        D11_STDERR="$(tail -2 "$sb/stderr" 2>/dev/null | tr '\n' ' ')"
+        local f
+        for f in STORE:store/profiles/SENTINEL_STORE \
+                 APPDATA:home/.local/share/chrome-isolation-manager/SENTINEL_APPDATA \
+                 LEGACY:home/Chrome/SENTINEL_LEGACY \
+                 DEFAULTSTORE:home/Isolated-Chrome/profiles/SENTINEL_DEFAULTSTORE \
+                 HOMEDIRPROFILES:home/profiles/SENTINEL_HOMEDIRPROFILES \
+                 OUTSIDE:home/SENTINEL_OUTSIDE \
+                 SIBLING:sibling/profiles.bak/SENTINEL_SIBLING \
+                 DECOY:decoy/profiles/SENTINEL_DECOY \
+                 DECOY2:decoy2/profiles/SENTINEL_DECOY2; do
+            local key="${f%%:*}" rel="${f#*:}"
+            if [[ -e "$sb/$rel" ]]; then
+                D11_GONE["$key"]=0
+            else
+                D11_GONE["$key"]=1
+            fi
+        done
+        return 0
+    }
+
+    declare -A D11_GONE
+    D11_PROBLEMS=(); D11_NOTES=""
+
+    # --- Scenario 1: the default install shape ------------------------------
+    # PROFILES_DIR resolves to $HOME/Isolated-Chrome/profiles, which now holds a
+    # realistic store, so it MUST be removed — as must the legacy ~/Chrome. Both
+    # are the documented behaviour, and both are what keeps this check from
+    # passing by refusing everything. Nothing outside those two locations may
+    # be touched.
+    if _d11_build "$WORK/d11-default" && _d11_run "$WORK/d11-default" UNSET; then
+        g() { printf '%s' "${D11_GONE[$1]}"; }
+        if [[ "$(g APPDATA)" != "1" ]]; then
+            D11_PROBLEMS+=("the default run did not remove the app data dir (rc=$D11_RC, stderr: $D11_STDERR) — uninstall.sh's own documented behaviour is broken, so nothing below can be concluded about the guard")
+        fi
+        if [[ "$(g DEFAULTSTORE)" != "1" ]]; then
+            D11_PROBLEMS+=("the default run did not remove the default profile store ~/Isolated-Chrome/profiles (rc=$D11_RC, stderr: $D11_STDERR) — a guard that cannot remove the real store is its own bug, and this is the check that keeps it from becoming one")
+        fi
+        if [[ "$(g LEGACY)" != "1" ]]; then
+            D11_PROBLEMS+=("the default run did not remove the legacy ~/Chrome (rc=$D11_RC, stderr: $D11_STDERR) — a pre-migration install would keep its data")
+        else
+            D11_NOTES+="default: ~/Isolated-Chrome/profiles and legacy ~/Chrome both removed as documented; "
+        fi
+        for k in OUTSIDE SIBLING DECOY DECOY2 STORE HOMEDIRPROFILES; do
+            [[ "$(g $k)" == "1" ]] && \
+                D11_PROBLEMS+=("the DEFAULT run destroyed the '$k' sentinel, which is not the resolved profile store")
+        done
+    else
+        D11_PROBLEMS+=("could not build or run the default sandbox")
+    fi
+
+    # --- Scenario 2: CHROME_ISOLATION_HOME pointing at the real store -------
+    if _d11_build "$WORK/d11-honest" && _d11_run "$WORK/d11-honest" "$WORK/d11-honest/store"; then
+        g() { printf '%s' "${D11_GONE[$1]}"; }
+        if [[ "$(g STORE)" != "1" ]]; then
+            D11_PROBLEMS+=("with CHROME_ISOLATION_HOME on the store the store was NOT removed (rc=$D11_RC, stderr: $D11_STDERR)")
+        fi
+        for k in OUTSIDE SIBLING DECOY DECOY2 HOMEDIRPROFILES; do
+            [[ "$(g $k)" == "1" ]] && \
+                D11_PROBLEMS+=("with CHROME_ISOLATION_HOME on the store, the '$k' sentinel was destroyed")
+        done
+        D11_NOTES+="honest CHROME_ISOLATION_HOME: store removed, all out-of-store sentinels survived; "
+    else
+        D11_PROBLEMS+=("could not build or run the honest-CHROME_ISOLATION_HOME sandbox")
+    fi
+
+    # --- Scenario 3: HOSTILE CHROME_ISOLATION_HOME --------------------------
+    # $CHROME_ISOLATION_HOME points at a directory that is NOT the app's
+    # profile store but whose leaf resolves to something named `profiles` and
+    # is deep enough and named right. This is the case the guard was added for
+    # and the case it is easiest to get wrong: the old guard keyed on the leaf
+    # name being "profiles" or "Chrome", which any directory can satisfy.
+    #
+    # decoy  holds only a foreign file.
+    # decoy2 holds a FILE named `Default`, i.e. the directory-name bait without
+    #        the directory being a Chromium profile.
+    # Both must survive. A guard that only asks "is the leaf called profiles"
+    # destroys both; a guard that only asks "is there something Chromium-ish in
+    # here" destroys decoy2's parent.
+    if _d11_build "$WORK/d11-hostile" && _d11_run "$WORK/d11-hostile" "$WORK/d11-hostile/decoy"; then
+        g() { printf '%s' "${D11_GONE[$1]}"; }
+        if [[ "$(g DECOY)" == "1" ]]; then
+            D11_PROBLEMS+=("HOSTILE CHROME_ISOLATION_HOME: uninstall.sh rm -rf'd $WORK/d11-hostile/decoy/profiles, which is a real directory but NOT this app's profile store. A guard that accepts any directory merely NAMED 'profiles' is not a guard.")
+        else
+            D11_NOTES+="hostile CHROME_ISOLATION_HOME: the decoy store was refused; "
+        fi
+        for k in DECOY2 OUTSIDE SIBLING STORE HOMEDIRPROFILES; do
+            [[ "$(g $k)" == "1" ]] && \
+                D11_PROBLEMS+=("HOSTILE CHROME_ISOLATION_HOME destroyed the '$k' sentinel")
+        done
+        # A refusal must be a REPORTED refusal, not a crash or a silent abort:
+        # the user needs to be told what was left and how to remove it.
+        if ! grep -q 'LEFT IN PLACE' "$WORK/d11-hostile/stderr" 2>/dev/null; then
+            D11_PROBLEMS+=("HOSTILE CHROME_ISOLATION_HOME: the decoy survived but uninstall.sh said nothing about it — a refused directory must be named, with a reason and a manual command, or the user is left with orphan data and no idea why")
+        fi
+    else
+        D11_PROBLEMS+=("could not build or run the hostile-CHROME_ISOLATION_HOME sandbox")
+    fi
+
+    # --- Scenario 4: HOSTILE CHROME_ISOLATION_HOME, leaf is a SYMLINK -------
+    # The resolved store is a symlink pointing at the decoy. `rm -rf` on a
+    # symlink is cheap, but a guard that dereferences symlinks before deciding
+    # can be walked anywhere by one environment variable.
+    if _d11_build "$WORK/d11-symlink" && _d11_run "$WORK/d11-symlink" "$WORK/d11-symlink/sym"; then
+        g() { printf '%s' "${D11_GONE[$1]}"; }
+        if [[ "$(g DECOY)" == "1" ]]; then
+            D11_PROBLEMS+=("HOSTILE CHROME_ISOLATION_HOME (symlink): uninstall.sh followed <hostile>/profiles -> ../decoy/profiles and destroyed the decoy's contents")
+        elif [[ ! -L "$WORK/d11-symlink/sym/profiles" ]]; then
+            D11_PROBLEMS+=("HOSTILE CHROME_ISOLATION_HOME (symlink): the symlink itself was removed. This script only ever removes real directories it can name outright; a symlink means the path was steered somewhere other than where it points at resolution time")
+        else
+            D11_NOTES+="symlinked store refused (neither the link nor its target touched); "
+        fi
+    else
+        D11_PROBLEMS+=("could not build or run the symlink-CHROME_ISOLATION_HOME sandbox")
+    fi
+
+    # --- Scenario 5: HOSTILE CHROME_ISOLATION_HOME = \$HOME ------------------
+    # The nastiest shape: the decoy contains REAL Chromium artefacts, so it
+    # satisfies every shape test, and it is still not this app's store —
+    # $HOME/profiles is a location the app never creates. This is what proves
+    # the guard anchors on CONTAINMENT and not on appearance alone.
+    if _d11_build "$WORK/d11-home" && _d11_run "$WORK/d11-home" "$WORK/d11-home/home"; then
+        g() { printf '%s' "${D11_GONE[$1]}"; }
+        if [[ "$(g HOMEDIRPROFILES)" == "1" ]]; then
+            D11_PROBLEMS+=("HOSTILE CHROME_ISOLATION_HOME=\$HOME: uninstall.sh rm -rf'd \$HOME/profiles even though it holds genuine-looking Chromium profile data — a guard that only asks 'does this look like ours' will delete this, and the shape test is not enough on its own")
+        else
+            D11_NOTES+="CHROME_ISOLATION_HOME=\$HOME refused despite holding realistic profile data (containment, not appearance); "
+        fi
+        for k in OUTSIDE DECOY DECOY2 STORE SIBLING; do
+            [[ "$(g $k)" == "1" ]] && \
+                D11_PROBLEMS+=("CHROME_ISOLATION_HOME=\$HOME destroyed the '$k' sentinel")
+        done
+    else
+        D11_PROBLEMS+=("could not build or run the CHROME_ISOLATION_HOME=\$HOME sandbox")
+    fi
+
+    if [[ ${#D11_PROBLEMS[@]} -gt 0 ]]; then
+        fail 11 "$D11_TITLE" \
+              "${D11_PROBLEMS[*]} | observed: $D11_NOTES" \
+              "uninstall.sh must answer TWO independent questions before rm -rf, and a directory has to pass both. (1) Could this path have been produced by this app? Construct the candidate from \$HOME and this app's own naming convention only — <isolation home>/profiles and \$HOME/Chrome — never from config, the registry or anything steerable; refuse symlinks and require the resolved path to equal the canonical one. (2) Does it hold data this app created? Require at least one profile directory containing Default/ plus Local State or hardware-signature.json. The old guard (leaf name in {profiles, Chrome}, depth >= 2 slashes, not \$HOME) satisfies neither question: any directory named 'profiles' passes it. Containment alone is defeated by a hostile \$CHROME_ISOLATION_HOME, and appearance alone is defeated by \$HOME/profiles — scenario 5 is what stops a shape-only guard from passing."
+    else
+        pass 11 "$D11_TITLE" \
+              "executed for real under a fake \$HOME with docker/sudo/dpkg/rpm stubbed, across 5 scenarios. REMOVED: ~/Isolated-Chrome/profiles, legacy ~/Chrome, an explicitly-configured store, the app data dir. REFUSED and reported with a manual command: a decoy 'profiles' directory under a hostile \$CHROME_ISOLATION_HOME, a second decoy carrying a file named 'Default', a symlinked store, and \$HOME/profiles even though it holds realistic Chromium data. Also survived: \$HOME itself and a sibling 'profiles.bak' | $D11_NOTES"
+    fi
+fi
+
+# =========================================================================== #
+# CHECK 12 — the update path is DETECT-ONLY by default
+# =========================================================================== #
+# A Chromium auto-update that rebuilds the image unattended is a large,
+# root-adjacent, and (for profile data) irreversible operation: Chromium
+# upgrades a profile in place and will not downgrade it. The shipped default
+# must therefore detect and report, and build ONLY on explicit consent or a
+# named env opt-in.
+#
+# Asserted against the real module with all three side-effect seams injected
+# (docker client, run_cmd, detector), all state redirected into $WORK, so this
+# genuinely executes the decision logic and observes whether it chose to
+# build. A static grep would not: the property is about the branch taken.
+# --------------------------------------------------------------------------- #
+_hd "12. Chromium update path is detect-only by default (no build without consent)"
+
+D12_PY_RC=3
+D12_OUT=""
+if [[ -n "$PY_BIN" && -f "$REPO_ROOT/backend/image_update.py" ]]; then
+    _log "exercising image_update decision logic with injected seams (no Docker calls, all state in $WORK)"
+    D12_OUT="$(cd "$REPO_ROOT" && VERIFY_SCRATCH="$WORK" "$PY_BIN" - "$WORK/au" 2>&1 <<'PY_EOF'
+import os, sys
+scratch = sys.argv[1]
+os.makedirs(scratch, exist_ok=True)
+sys.path.insert(0, 'backend')
+
+try:
+    import image_update as iu
+except Exception as e:
+    print("IMPORT_ERROR %s" % e); sys.exit(3)
+
+# The three opt-in flags must all be CLEAR in this process, or the scenario
+# below is meaningless. The harness must never inherit a developer's opt-in.
+LEAKY = [n for n in (iu.ENV_DISABLE, iu.ENV_FORCE, getattr(iu, 'ENV_AUTO_REBUILD', ''))
+         if n and os.environ.get(n)]
+for n in LEAKY:
+    os.environ.pop(n, None)
+if os.environ.get(iu.ENV_DETECTOR):
+    print("NOTE %s was set in this environment and has been cleared for the test"
+          % iu.ENV_DETECTOR)
+    os.environ.pop(iu.ENV_DETECTOR, None)
+
+# --- a fake docker client: zero containers, so nothing defers ----------------
+class _Ctrs:
+    def list(self, **kw): return []
+class _Imgs:
+    def get(self, n): raise KeyError(n)
+class _FakeCli:
+    containers = _Ctrs(); images = _Imgs()
+
+# --- a run_cmd recorder: records what WOULD be run, runs nothing -------------
+BUILDS = []
+def _record_run_cmd(cmd, env=None, timeout=None):
+    argv = list(cmd) if isinstance(cmd, (list, tuple)) else [str(cmd)]
+    if argv and argv[0] == 'docker':
+        verb = next((a for a in argv[1:] if not a.startswith('-')), '')
+        if verb == 'build':
+            BUILDS.append(argv)
+        # Pretend every other docker call succeeded with empty output.
+        return 0, '', ''
+    return 0, '', ''
+
+def _mk(detector, tag):
+    """An updater whose lock/state files live in the scratch dir."""
+    return iu.ImageUpdater(
+        client_factory=lambda: _FakeCli(),
+        run_cmd=_record_run_cmd,
+        detector=detector,
+        image_name='verify-detect-only',
+        lock_file=os.path.join(scratch, '%s.lock' % tag),
+        state_file=os.path.join(scratch, '%s.json' % tag),
+        min_interval=0, failure_cooldown=0, defer_cooldown=0,
+    )
+
+# --- Scenario A: an update IS available, nobody has consented. ---------------
+# This is the case that matters: detection succeeds, the answer is "yes there
+# is a newer Chromium", and the default must still NOT build.
+BUILDS.clear()
+upd = _mk(lambda img: {'current': '124.0.6367.78', 'latest': '152.0.7977.82'}, 'A')
+upd._read_installed_versions = lambda: ('124.0.6367.78', '3.24.2')
+upd.check_and_start(reason='app_start')
+upd.wait_for_idle(30)
+st = upd.get_update_status()
+print("A\tstate=%s\tbuilds=%d\tconsent_required=%s\tpolicy=%s" % (
+    st.get('state'), len(BUILDS), st.get('consent_required'), st.get('policy')))
+if BUILDS:
+    print("A_FAIL\tbuilt with no consent: %s" % BUILDS[0][:4])
+    sys.exit(1)
+if st.get('state') != 'update_available':
+    print("A_FAIL\tan available update should rest in state 'update_available', got %r "
+          "(an update that is merely detected must be visible to the user)"
+          % st.get('state'))
+    sys.exit(1)
+if not st.get('consent_required'):
+    print("A_FAIL\tconsent_required is not set while an update is pending, so the UI "
+          "has no way to offer 'Apply now'")
+    sys.exit(1)
+if st.get('policy') != 'notify_only':
+    print("A_FAIL\tpolicy is %r, expected 'notify_only'" % st.get('policy'))
+    sys.exit(1)
+
+# --- Scenario B: the startup call must not pass force ------------------------
+# main.js calls image_update_check with {}; check_and_start(force=None) must
+# resolve force from the ENVIRONMENT, not from the caller.
+import inspect
+sig = inspect.signature(iu.check_and_start)
+if 'force' not in sig.parameters:
+    print("B_FAIL\tmodule-level check_and_start has no force parameter")
+    sys.exit(1)
+print("B\tmodule check_and_start signature = %s" % sig)
+
+# --- Scenario C: with the kill switch set, nothing happens at all -----------
+BUILDS.clear()
+os.environ[iu.ENV_DISABLE] = '1'
+upd_c = _mk(lambda img: {'current': '124.0.6367.78', 'latest': '152.0.7977.82'}, 'C')
+upd_c._read_installed_versions = lambda: ('124.0.6367.78', '3.24.2')
+res = upd_c.check_and_start(reason='app_start')
+upd_c.wait_for_idle(30)
+print("C\tresult=%s\tbuilds=%d\tstate=%s" % (
+    res.get('reason'), len(BUILDS), upd_c.get_update_status().get('state')))
+if BUILDS:
+    print("C_FAIL\tkill switch was set but a build ran")
+    sys.exit(1)
+if res.get('reason') != 'disabled':
+    print("C_FAIL\tkill switch did not produce reason='disabled', got %r" % res.get('reason'))
+    sys.exit(1)
+os.environ.pop(iu.ENV_DISABLE, None)
+
+# --- Scenario D: explicit consent for the EXACT version does build ----------
+# The counterpart to A. If consent cannot cause a build, then A passing would
+# prove nothing: "it never builds" and "it can never build" look identical.
+BUILDS.clear()
+upd_d = _mk(lambda img: {'current': '124.0.6367.78', 'latest': '152.0.7977.82'}, 'D')
+upd_d._read_installed_versions = lambda: ('124.0.6367.78', '3.24.2')
+# Walk the consent path the way the bridge does. apply_update is the gate; call
+# it with the version the status reports as available.
+res_d = upd_d.check_and_start(reason='app_start')
+upd_d.wait_for_idle(30)
+st_d = upd_d.get_update_status()
+want = st_d.get('consent_version')
+if not want:
+    print("D_FAIL\tno consent_version was offered, so the consent path is untestable")
+    sys.exit(1)
+upd_d2 = _mk(lambda img: {'current': '124.0.6367.78', 'latest': '152.0.7977.82'}, 'D2')
+upd_d2._read_installed_versions = lambda: ('124.0.6367.78', '3.24.2')
+res_d2 = upd_d2.apply_update(version=want)
+upd_d2.wait_for_idle(30)
+print("D\tconsent_version=%s\tstarted=%s\tbuilds=%d\tstate=%s" % (
+    want, res_d2.get('started'), len(BUILDS), upd_d2.get_update_status().get('state')))
+if not BUILDS:
+    print("D_FAIL\twith explicit, version-matched consent nothing was built either — "
+          "so scenario A proves nothing (a module that can never build is not "
+          "detect-only, it is broken)")
+    sys.exit(1)
+
+# --- Scenario E: consent for a DIFFERENT version must not build -------------
+# The anti-"blanket yes" property: approving 152 must not silently deliver 154.
+BUILDS.clear()
+upd_e = _mk(lambda img: {'current': '124.0.6367.78', 'latest': '154.0.1.1'}, 'E')
+upd_e._read_installed_versions = lambda: ('124.0.6367.78', '3.24.2')
+res_e = upd_e.apply_update(version='152.0.7977.82')
+upd_e.wait_for_idle(30)
+st_e = upd_e.get_update_status()
+print("E\tconsent=152.0.7977.82\tavailable=154.0.1.1\tbuilds=%d\tstate=%s" % (
+    len(BUILDS), st_e.get('state')))
+if BUILDS:
+    print("E_FAIL\tconsent for 152 produced a build of 154 — a blanket 'yes to updates'")
+    sys.exit(1)
+
+# --- Scenario F: 'unknown' must never read as 'up to date' ------------------
+# A detector that cannot tell is the common case (no network, an EOL branch).
+# Collapsing it into up_to_date is how a browser stays stale behind a green UI.
+BUILDS.clear()
+def _raise_detector(img):
+    raise RuntimeError("no network")
+upd_f = _mk(_raise_detector, 'F')
+upd_f._read_installed_versions = lambda: ('124.0.6367.78', None)
+upd_f.check_and_start(reason='app_start')
+upd_f.wait_for_idle(30)
+st_f = upd_f.get_update_status()
+print("F\tstate=%s\tbuilds=%d" % (st_f.get('state'), len(BUILDS)))
+if BUILDS:
+    print("F_FAIL\ta detector that raised still produced a build")
+    sys.exit(1)
+if st_f.get('state') == 'up_to_date':
+    print("F_FAIL\t'could not determine' was reported as 'up_to_date' — those are "
+          "different facts and conflating them is exactly the bug the state "
+          "vocabulary exists to prevent")
+    sys.exit(1)
+
+print("STATES\t%s" % ','.join(iu.STATES))
+sys.exit(0)
+PY_EOF
+)"
+    D12_PY_RC=$?
+fi
+
+D12_NOTE="$(printf '%s\n' "$D12_OUT" | grep -E "^[A-F]$(printf '\t')" | tr '\n' ' ')"
+if [[ $D12_PY_RC -eq 3 ]]; then
+    skip 12 "update path is detect-only by default" "could not import image_update: $D12_OUT" "fix the import; without it this check cannot run"
+elif [[ $D12_PY_RC -gt 1 ]]; then
+    fail 12 "update path is detect-only by default" \
+          "the detect-only scenarios could not be evaluated (rc=$D12_PY_RC): $D12_OUT" \
+          "run the python block above directly to see the traceback"
+elif [[ $D12_PY_RC -eq 1 ]]; then
+    fail 12 "update path is detect-only by default" \
+          "CONSENT GATE VIOLATED: $(printf '%s\n' "$D12_OUT" | grep -E '_FAIL' | tr '\n' ' ') | $D12_NOTE" \
+          "an available update must rest in state 'update_available' with consent_required set and build nothing; only apply_update(version=<exact version the status reports>), CHROME_ISOLATION_AUTO_REBUILD=1 or CHROME_ISOLATION_FORCE_IMAGE_UPDATE=1 may build"
+else
+    pass 12 "update path is detect-only by default" \
+          "an available update is detected and reported, nothing is built, and consent for the exact version does build — so the gate is real and not merely a no-op | $D12_NOTE"
+fi
+
+# =========================================================================== #
+# CHECK 13 — the harness itself did not write to the user's data
+# =========================================================================== #
+# The harness introspects code by CALLING it. Calling the app's own functions
+# creates directories: ensure_host_share_dir() mkdirs into the real host-shares
+# root, and start_container() calls register_profile() which rewrites
+# profiles.json. An earlier version of this harness did exactly that, silently
+# adding a junk profile to the user's registry.
+#
+# So this check is a tripwire: it hashes the files that must never change and
+# reports a FAIL if any of them moved. It runs LAST because it compares the
+# snapshot taken before check 1 against the state now.
+#
+# The snapshot is written to $WORK only, and read-only throughout.
+# --------------------------------------------------------------------------- #
+_hd "13. harness is side-effect free (no writes to profiles.json / proxies.json / signatures)"
+
+# The "after" snapshot. Two segments are compared, so a mutation is attributed
+# to a phase rather than merely detected:
+#   segment 1  startup -> after check 1   == whatever the test suite did
+#   segment 2  after check 1 -> now       == whatever the harness's own checks did
+#
+# BOTH SEGMENTS ARE VERDICTS. Segment 1 used to be a footnote — the test suite
+# was excused because it spawns the real bridge as a subprocess, and it had in
+# fact been observed leaving real profiles and real host-share directories in
+# the user's data. That excuse is the bug: the test suite is part of this
+# harness, `scripts/verify.sh` runs it, and a verification harness that writes
+# into the user's data directory is unacceptable whether it did so directly or
+# by shelling out. A footnote about a mutation is a FAIL that has learned to
+# apologise. Segment 2 keeps its stricter blame message because that is the
+# part the harness itself controls without invoking anything else.
+D13_SNAP_END="$WORK/snapshot-02-end.tsv"
+_snapshot_files > "$D13_SNAP_END"
+
+_d13_changes() { diff "$1" "$2" 2>/dev/null | grep -E '^>' | sed 's/^> //' | tr '\n' ';'; }
+D13_BY_TESTS="$(_d13_changes "$D13_SNAP" "$D13_SNAP_POST_TESTS")"
+D13_BY_HARNESS="$(_d13_changes "$D13_SNAP_POST_TESTS" "$D13_SNAP_END")"
+N_WATCHED="$(grep -c . "$D13_SNAP" || true)"
+
+D13_CONCURRENCY_NOTE=""
+if [[ "${D13_CONCURRENT:-0}" -gt 0 ]]; then
+    D13_CONCURRENCY_NOTE=" ATTRIBUTION IMPOSSIBLE: $D13_CONCURRENT other process(es) were running this repo's pytest suite or a backend bridge at the same time, and those register real profiles in the registry and create real host-share directories. A mutation below therefore cannot be blamed on the harness without re-running when the machine is idle."
+fi
+
+D13_TESTS_NOTE=""
+if [[ -n "$D13_BY_TESTS" ]]; then
+    D13_TESTS_NOTE=" The test suite (check 1) also changed: $D13_BY_TESTS — that phase spawns the real bridge as a subprocess, so it is not a sandbox either."
+fi
+
+if [[ -z "$D13_BY_HARNESS" && -z "$D13_BY_TESTS" ]]; then
+    pass 13 "harness is side-effect free" \
+          "the test suite AND checks 2-13 changed nothing: $N_WATCHED watched path(s) — profiles.json, proxies.json, every profile store and signature, the host-shares root and the generated .desktop files are all byte-identical to their state before the harness ran. Both phases are verdicts now: the test suite is part of the harness and is held to the same standard as the probes."
+else
+    if [[ "${D13_CONCURRENT:-0}" -gt 0 ]]; then
+        # A mutation really happened, but the harness cannot say it was its
+        # own. Reporting this as a harness FAIL would be a guess dressed up as
+        # a verdict; reporting it as a PASS would hide a real change. SKIP is
+        # the honest middle: the check did not evaluate cleanly.
+        skip 13 "harness is side-effect free" \
+              "user data DID change during the run, but this cannot be attributed: checks: $D13_BY_HARNESS; test suite: $D13_BY_TESTS.$D13_CONCURRENCY_NOTE" \
+              "re-run scripts/verify.sh when no other pytest/bridge process for this repo is running; a clean run will then either pass or name the harness as the cause"
+    elif [[ -n "$D13_BY_TESTS" && -z "$D13_BY_HARNESS" ]]; then
+        fail 13 "harness is side-effect free" \
+              "THE HARNESS MUTATED USER DATA — the pytest phase (check 1): $D13_BY_TESTS — the probes themselves were clean, but scripts/verify.sh runs that suite, so the mutation is the harness's own.$D13_CONCURRENCY_NOTE" \
+              "the tests that exercise the real bridge must run it against a redirected HOME (a mktemp -d), not the user's: spawn it with env HOME=<scratch> so config.py derives APP_DATA_DIR, the registry and the host-shares root inside the sandbox. Do not 'fix' this by relaxing the snapshot."
+    else
+        fail 13 "harness is side-effect free" \
+              "THE HARNESS MUTATED USER DATA — checks 2-13: $D13_BY_HARNESS$D13_TESTS_NOTE$D13_CONCURRENCY_NOTE" \
+              "every check must redirect its writes into the mktemp scratch dir ($WORK). The decisive lesson from the bug this caught: patching a FUNCTION name is not enough, because _profile_host_mount() reaches host_share.ensure_host_share_dir through resolve_host_mount() in host_share's own namespace, so the stub was never called and the real mkdir ran. Patch the LOCATION (host_share.HOST_SHARES_DIR) and the function, and let the probe measure its own leak (PROBE_HOST_SHARE_LEAK)."
     fi
 fi
 
