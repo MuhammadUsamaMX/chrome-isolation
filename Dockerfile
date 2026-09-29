@@ -22,17 +22,25 @@ RUN cc -O2 -Wall -fPIC -shared -o /libhwspoof.so /src/libhwspoof.c \
 # but whose hooks do not resolve is worse than no shim at all. Run the real
 # activation check here, so an image that would fail at container start fails at
 # BUILD time instead.
+#
+# WHAT THIS GATE PROVES, precisely: the loader accepted the object, and every
+# libc symbol the hooks require on this platform resolved through the same
+# table the hooks read (see hwspoof_symbols in the source). It does NOT prove
+# the shim's effects — that /proc/meminfo gets redirected or that the spoof tree
+# exists. Those depend on CHROME_SPOOF_ROOT and on callers going through libc,
+# and they are measured end-to-end by scripts/verify.sh check 4, not here.
 RUN set -eu; \
     probe="$(mktemp)"; \
-    LD_PRELOAD=/libhwspoof.so CHROME_SPOOF_PROBE="$probe" /bin/true >/dev/null 2>&1 || true; \
+    LD_PRELOAD=/lib/hwspoof.so CHROME_SPOOF_PROBE="$probe" /bin/true >/dev/null 2>&1 || true; \
     got="$(cat "$probe" 2>/dev/null || true)"; \
     if [ "$got" != "loaded" ]; then \
         echo "FATAL: built shim did not self-test (probe said '$got')" >&2; \
+        echo "FATAL: 'loaded' means every REQUIRED hook symbol resolved; see hwspoof_symbols" >&2; \
         rm -f "$probe"; \
         exit 1; \
     fi; \
     rm -f "$probe"; \
-    echo "Shim self-test OK: /libhwspoof.so loads and its hooks resolve"
+    echo "Shim self-test OK: loader accepted the shim and all required hook symbols resolved"
 
 FROM alpine:${ALPINE_VERSION}
 

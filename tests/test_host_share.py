@@ -5,6 +5,7 @@ or: python3 -m pytest tests/test_host_share.py
 Covers the T1 / F1 fix: the container's /home/chrome/host must never default to
 the user's home directory, and user-supplied mounts are validated.
 """
+import contextlib
 import os
 import shutil
 import stat
@@ -12,9 +13,12 @@ import sys
 import tempfile
 import traceback
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'backend'))
 
 import host_share
+import paths
 
 
 def _with_tmp_shares():
@@ -382,6 +386,265 @@ def test_profile_service_rejects_root_host_mount():
 
 
 # ── registry migration is non-destructive ───────────────────────────────────
+# ── M2: this app's own storage and real browsers' storage are refused ────────
+# F1 said an explicit user choice could not reach the most sensitive targets.
+# It could: the profile store (every OTHER profile's cookies/logins/history),
+# the app data dir (profiles.json — all profile names plus proxy URLs that may
+# carry user:pass@ credentials — proxies.json, the other host-shares/), and
+# real Chrome's own tree. All one field away in the Edit modal.
+def _deny_reason(msg):
+    """The specific reason text from a refusal, or '' if it is not a refusal."""
+    return msg.split(':', 1)[0] if msg.startswith('Refusing') else ''
+
+
+@contextlib.contextmanager
+def _isolated_env():
+    """
+    Run a block against a throwaway $HOME so the deny-list can be tested
+    without depending on what happens to exist on the machine running the
+    tests, and without writing anything into the real home.
+
+    Redirects $HOME, $CHROME_ISOLATION_HOME and host_share's two app-dir
+    globals. The globals matter: host_share captured APP_DATA_DIR and
+    HOST_SHARES_DIR from config at import time, and the deny-list reads those
+    module globals (so tests can redirect them the way _with_tmp_shares does).
+    """
+    tmp = tempfile.mkdtemp(prefix='host-share-home-')
+    home = os.path.join(tmp, 'home')
+    os.makedirs(home)
+    old_env = {'HOME': os.environ.get('HOME'),
+               paths.ISOLATION_HOME_ENV: os.environ.get(paths.ISOLATION_HOME_ENV)}
+    old_app_data = host_share.APP_DATA_DIR
+    old_shares = host_share.HOST_SHARES_DIR
+    os.environ['HOME'] = home
+    os.environ[paths.ISOLATION_HOME_ENV] = os.path.join(home, 'Isolated-Chrome')
+    host_share.APP_DATA_DIR = paths.app_data_dir()
+    host_share.HOST_SHARES_DIR = os.path.join(host_share.APP_DATA_DIR, 'host-shares')
+    os.makedirs(host_share.HOST_SHARES_DIR, exist_ok=True)
+    try:
+        yield home
+    finally:
+        host_share.APP_DATA_DIR = old_app_data
+        host_share.HOST_SHARES_DIR = old_shares
+        for k, v in old_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _is_below(parent, child):
+    return child == parent or child.startswith(parent + os.sep)
+
+
+def _mkdirs(root, *rel):
+    out = []
+    for r in rel:
+        p = os.path.join(root, r)
+        os.makedirs(p, exist_ok=True)
+        out.append(p)
+    return out
+
+
+def test_profile_store_rejected_including_other_profiles():
+    """The active profile store is the exact harm F1 was opened for."""
+    with _isolated_env() as home:
+        store, other, deep = _mkdirs(
+            home, 'Isolated-Chrome/profiles',
+            'Isolated-Chrome/profiles/Zoom-1',
+            'Isolated-Chrome/profiles/Zoom-1/Default')
+        for path in (store, other, deep):
+            msg = _raises(host_share.validate_host_mount, path)
+            assert 'profile store' in msg, (path, msg)
+        # and it must not be accepted through the resolve_* entry point either
+        tmp = _with_tmp_shares()
+        try:
+            msg = _raises(host_share.resolve_host_mount, 'Zoom-1', deep)
+            assert 'Refusing' in msg, msg
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_app_data_dir_and_its_contents_rejected():
+    """APP_DATA_DIR holds profiles.json/proxies.json and the other profiles'
+    host-shares/ — the whole registry, in one bind mount."""
+    with _isolated_env() as home:
+        app_data, shares, other_share = _mkdirs(
+            home, '.local/share/chrome-isolation-manager',
+            '.local/share/chrome-isolation-manager/host-shares',
+            '.local/share/chrome-isolation-manager/host-shares/Fiverr-Read')
+        registry = os.path.join(app_data, 'profiles.json')
+        for path in (app_data, shares, other_share):
+            msg = _raises(host_share.validate_host_mount, path)
+            assert 'Refusing' in msg, (path, msg)
+        # A FILE in there must be refused by the policy rule, not by "not found".
+        open(registry, 'w').close()
+        msg = _raises(host_share.validate_host_mount, registry)
+        assert 'Refusing' in msg and 'not found' not in msg, msg
+
+
+def test_real_browser_stores_rejected():
+    """Real Chrome/Firefox trees are the same harm reached the other way."""
+    with _isolated_env() as home:
+        targets = _mkdirs(
+            home, '.config/google-chrome', '.config/google-chrome/Default',
+            '.mozilla', '.mozilla/firefox/abc.default',
+            '.config/BraveSoftware', '.config/microsoft-edge',
+            '.config/vivaldi', '.config/opera')
+        for path in targets:
+            msg = _raises(host_share.validate_host_mount, path)
+            assert 'Refusing' in msg, (path, msg)
+
+
+def test_dotdot_escape_into_denied_root_rejected():
+    """A `..` hop out of an allowed subfolder must not launder the target.
+    realpath() collapses it before the comparison, so the same rule fires."""
+    with _isolated_env() as home:
+        share, store, _zoom, other_profile = _mkdirs(
+            home, 'share', 'Isolated-Chrome/profiles',
+            'Isolated-Chrome/profiles/Zoom-1/Default',
+            'Isolated-Chrome/profiles/Fiverr-Read')
+        browser = os.path.join(home, '.config', 'google-chrome')
+        escapes = [
+            # out of a *legitimately shareable* subfolder, into the store
+            os.path.join(share, '..', 'Isolated-Chrome', 'profiles'),
+            os.path.join(share, '..', 'Isolated-Chrome', 'profiles', 'Zoom-1',
+                         'Default'),
+            # a sibling profile reached by hopping up and back down
+            os.path.join(store, 'Zoom-1', '..', 'Fiverr-Read'),
+            # and the same trick aimed at a real browser's tree
+            os.path.join(share, '..', '.config', 'google-chrome'),
+            # redundant '.' mixed in, so it is not merely a literal '..' match
+            os.path.join(share, '.', '..', 'Isolated-Chrome', 'profiles',
+                         'Zoom-1', '..', 'Fiverr-Read'),
+        ]
+        for path in escapes:
+            # Precondition: the escape really does land on a denied root, so a
+            # pass below cannot be explained by the path going somewhere else.
+            landed = os.path.realpath(path)
+            assert landed != share and not _is_below(share, landed), (path, landed)
+            # The escape landed on a denied root (or on the isolation home
+            # that contains it) — not somewhere unrelated.
+            denied = [os.path.realpath(store), os.path.realpath(other_profile),
+                      os.path.realpath(browser),
+                      os.path.realpath(os.path.dirname(store))]
+            assert any(landed == d or _is_below(d, landed) for d in denied), \
+                (path, landed, denied)
+            msg = _raises(host_share.validate_host_mount, path)
+            assert 'Refusing' in msg, (path, msg)
+
+
+def test_symlink_to_denied_root_rejected():
+    """A symlink with an innocent name resolves to the target and is refused."""
+    with _isolated_env() as home:
+        store, browser = _mkdirs(home, 'Isolated-Chrome/profiles',
+                                 '.config/google-chrome')
+        links_dir = os.path.join(home, 'shared-docs')
+        os.makedirs(links_dir, exist_ok=True)
+        for name, target in (('my-share', store),
+                             ('public-html', browser),
+                             ('pics', os.path.join(store, 'Zoom-1'))):
+            link = os.path.join(links_dir, name)
+            os.symlink(target, link)
+            msg = _raises(host_share.validate_host_mount, link)
+            assert 'Refusing' in msg, (link, msg)
+
+
+def test_denied_roots_follow_the_relocated_store():
+    """The deny-list must read the store location from paths.py, not hardcode
+    `~/Isolated-Chrome`. A $CHROME_ISOLATION_HOME override must be honoured."""
+    with _isolated_env() as home:
+        elsewhere = os.path.join(home, 'somewhere-else')
+        os.makedirs(elsewhere, exist_ok=True)
+        os.environ[paths.ISOLATION_HOME_ENV] = elsewhere
+        store = os.path.join(elsewhere, 'profiles')
+        _mkdirs(elsewhere, 'profiles/Zoom-1/Default')
+        try:
+            msg = _raises(host_share.validate_host_mount, store)
+            assert 'Refusing' in msg, msg
+        finally:
+            os.environ[paths.ISOLATION_HOME_ENV] = os.path.join(
+                home, 'Isolated-Chrome')
+        # The old location is no longer the store, so it is no longer denied
+        # *as a store* — but it still exists as a path, and mounting it is not
+        # something the deny-list silently allows just because the env moved.
+        old = os.path.join(home, 'Isolated-Chrome', 'profiles')
+        if os.path.isdir(old):
+            # paths.legacy_profiles_dir/default_profiles_dir still name the
+            # default location, so this remains refused. Assert the behaviour
+            # rather than a comment: the default location is always denied.
+            msg = _raises(host_share.validate_host_mount, old)
+            assert 'Refusing' in msg, msg
+
+
+def test_denied_paths_rejected_even_when_absent():
+    """The policy check runs before the existence check, so a denied path is
+    refused as a policy violation rather than reported as 'not found'."""
+    with _isolated_env() as home:
+        for rel in ('Isolated-Chrome/profiles/does-not-exist',
+                    '.config/google-chrome/does-not-exist',
+                    '.mozilla/does-not-exist',
+                    '.local/share/chrome-isolation-manager/does-not-exist'):
+            path = os.path.join(home, rel)
+            assert not os.path.exists(path), path
+            msg = _raises(host_share.validate_host_mount, path)
+            assert 'Refusing' in msg and 'not found' not in msg, (path, msg)
+
+
+def test_hostile_isolation_home_does_not_refuse_all_of_home():
+    """$CHROME_ISOLATION_HOME is user-controlled. If it is set to $HOME itself,
+    adding the *unresolved* home directory to the deny-list would refuse every
+    subfolder of home and silently break the documented behaviour. Only the
+    locations named inside it are refused."""
+    with _isolated_env() as home:
+        os.environ[paths.ISOLATION_HOME_ENV] = home
+        try:
+            denied = [r for r, _ in host_share._app_owned_roots()]
+            assert os.path.realpath(home) not in denied, denied
+            assert os.sep not in denied, denied
+            # ~/profiles is the store in this configuration, so it IS refused
+            profiles = _mkdirs(home, 'profiles/Fiverr-Read')[0]
+            assert os.path.join(home, 'profiles') in \
+                [os.path.realpath(d) for d in denied], denied
+            msg = _raises(host_share.validate_host_mount, profiles)
+            assert 'Refusing' in msg, msg
+            # ... but an ordinary subfolder of home is still shareable
+            share = _mkdirs(home, 'share')[0]
+            assert host_share.validate_host_mount(share) == share
+        finally:
+            os.environ[paths.ISOLATION_HOME_ENV] = os.path.join(
+                home, 'Isolated-Chrome')
+
+
+def test_plain_home_subfolders_still_allowed():
+    """The deny-list must be a list, not a blanket ban on the home directory:
+    a dedicated subfolder of home is still shareable (the documented
+    behaviour), while the entries above are not."""
+    with _isolated_env() as home:
+        for rel in ('share', 'Downloads', 'Documents',
+                    '.local/share/other-app-data'):
+            path = _mkdirs(home, rel)[0]
+            resolved = host_share.validate_host_mount(path)
+            assert resolved == path, (resolved, path)
+
+
+def test_real_host_denied_paths():
+    """Against the live tree: the paths the review measured are refused, and a
+    real subfolder of the real home is still allowed."""
+    store = os.path.realpath(paths.resolve_profiles_dir())
+    app_data = os.path.realpath(host_share.APP_DATA_DIR)
+    home = os.path.realpath(os.path.expanduser('~'))
+    for path in (store,
+                 os.path.join(store, 'some-profile', 'Default'),
+                 app_data,
+                 os.path.join(app_data, 'host-shares', 'some-profile'),
+                 os.path.join(home, '.config', 'google-chrome'),
+                 os.path.join(home, '.mozilla')):
+        msg = _raises(host_share.validate_host_mount, path)
+        assert 'Refusing' in msg, (path, msg)
+
+
 def test_registry_does_not_rewrite_empty_host_mount():
     tmp = _with_tmp_shares()
     try:
@@ -440,3 +703,47 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+
+# --------------------------------------------------------------------------- #
+# Parent-directory bypass: a deny-list entry is worthless if its PARENT is
+# shareable. `~/.config/google-chrome/..` realpaths to `~/.config`, so allowing
+# ~/.config hands over every browser store the list refuses, with one `..`.
+# Found by hand on 2026-09-29 after the browser-store deny-list landed.
+# --------------------------------------------------------------------------- #
+
+def test_config_dir_itself_is_refused():
+    with pytest.raises(ValueError):
+        host_share.validate_host_mount('~/.config')
+
+
+def test_dotdot_cannot_escape_the_browser_store_denial():
+    """`~/.config/google-chrome/..` resolves to ~/.config, not to a browser
+    store -- which is precisely why ~/.config has to be refused too."""
+    import os
+    assert os.path.realpath(os.path.expanduser('~/.config/google-chrome/..')) == \
+        os.path.realpath(os.path.expanduser('~/.config'))
+    with pytest.raises(ValueError):
+        host_share.validate_host_mount('~/.config/google-chrome/..')
+
+
+@pytest.mark.parametrize('victim', [
+    '~/.config/google-chrome', '~/.config/BraveSoftware', '~/.mozilla',
+])
+def test_no_refused_browser_store_is_reachable_via_a_parent(victim):
+    """For every refused browser store, the paths that resolve to it from an
+    allowed spelling must also be refused."""
+    import os
+    real = os.path.realpath(os.path.expanduser(victim))
+    for spelling in (real, real + '/.', real + '/../' + os.path.basename(real)):
+        with pytest.raises(ValueError):
+            host_share.validate_host_mount(spelling)
+
+
+def test_a_real_subfolder_of_home_is_still_shareable():
+    """The ~/.config subtree refusal must not creep into all of $HOME."""
+    for ok in ('~/Books', '~/Downloads', '~/Videos', '~/Pictures'):
+        try:
+            host_share.validate_host_mount(ok)
+        except ValueError as exc:  # pragma: no cover - only on a broken guard
+            pytest.fail(f'{ok} was refused: {exc}')
