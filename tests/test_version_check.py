@@ -197,15 +197,72 @@ def test_arch_mapping():
 
 # ═══════════════════════════════════════════════ 3. the index reader
 
-def _serve(body_or_exc, calls=None):
-    """Install a fake urlopen returning `body` (or raising `body_or_exc`)."""
+def _serve(body_or_exc, calls=None, stable=None):
+    """Install a fake urlopen returning `body` (or raising `body_or_exc`).
+
+    URL-AWARE, deliberately. The module makes two different kinds of request —
+    the APKINDEX (branch-relative Chromium lookup) and the stable-release
+    manifest (branch EOL lookup) — and a single canned body served to both used
+    to be indistinguishable from the real thing. Serving the APKINDEX gzip to
+    the YAML endpoint produces a UTF-8 error, which is a realistic failure but
+    not the realistic SUCCESS, and it silently made every test below exercise
+    "EOL undetermined" rather than the path the code actually takes in
+    production. `stable` defaults to a valid v3.24 manifest so the common case
+    is the real one; pass a value to pin it, or an Exception to fail it.
+    """
+    if stable is None:
+        stable = make_stable_releases("v3.24", "3.24.2")
     def fake_urlopen(request, timeout=None):
         if calls is not None:
             calls.append(request.full_url)
-        if isinstance(body_or_exc, Exception):
-            raise body_or_exc
-        return FakeResponse(body_or_exc)
+        is_stable = "latest-releases.yaml" in request.full_url
+        payload = stable if is_stable else body_or_exc
+        if isinstance(payload, Exception):
+            raise payload
+        return FakeResponse(payload)
     return fake_urlopen
+
+
+def make_stable_releases(branch, version, extra_branches=()):
+    """A real-shaped `latest-releases.yaml` body.
+
+    Mirrors the real file: a YAML list of release stanzas, each carrying
+    `branch:` and `version:`. The real document repeats both across every
+    stanza, which is why the reader requires them to agree.
+    """
+    chunks = []
+    for extra in extra_branches:
+        chunks.append(
+            "-\n  title: \"Mini root filesystem\"\n  desc: |\n    Minimal.\n"
+            "  branch: %s\n  arch: x86_64\n  version: %s\n"
+            "  flavor: alpine-minirootfs\n  file: alpine-minirootfs-%s-x86_64.tar.gz\n"
+            % (extra, version, version))
+    chunks.append(
+        "-\n  title: \"Mini root filesystem\"\n  desc: |\n    Minimal.\n"
+        "  branch: %s\n  arch: x86_64\n  version: %s\n"
+        "  flavor: alpine-minirootfs\n  file: alpine-minirootfs-%s-x86_64.tar.gz\n"
+        "-\n  title: \"Netboot\"\n  desc: |\n    Kernel.\n"
+        "  branch: %s\n  arch: x86_64\n  version: %s\n"
+        "  flavor: alpine-netboot\n  file: alpine-netboot-%s-x86_64.tar.gz\n"
+        % (branch, version, version, branch, version, version))
+    return "".join(chunks).encode()
+
+
+def _index_calls(calls):
+    """Only the APKINDEX requests, i.e. one per CHECK attempt.
+
+    The module also fetches the stable-release manifest, so counting raw
+    requests conflates "how many checks ran" with "how many endpoints exist".
+    Counting index reads is the direct expression of what these tests are
+    actually about — does the cache stop the check from repeating — and
+    `_stable_calls` asserts the same for the new endpoint, so the two together
+    are strictly stronger than the old raw count, not weaker.
+    """
+    return [c for c in calls if "APKINDEX" in c]
+
+
+def _stable_calls(calls):
+    return [c for c in calls if "latest-releases.yaml" in c]
 
 
 class _patched_urlopen:
@@ -428,13 +485,13 @@ LEGACY_PROBE = (
 )
 
 
-def _check(client, index_body, **kwargs):
-    """check_chromium_update against a fake client and a fake index."""
+def _check(client, index_body, stable=None, **kwargs):
+    """check_chromium_update against a fake client, index and EOL endpoint."""
     tmp = tempfile.mkdtemp(prefix="vercheck-")
     calls = []
     cache = os.path.join(tmp, "cache.json")
     try:
-        with _patched_urlopen(_serve(index_body, calls)):
+        with _patched_urlopen(_serve(index_body, calls, stable=stable)):
             return check_chromium_update(
                 client, cache_path=cache, **kwargs)
     finally:
@@ -649,6 +706,629 @@ def test_probe_container_is_removed_even_when_logs_fail():
     assert result["update_available"] is None
 
 
+# ═════════════════════════════ 6b. branch EOL — is the BASE OS still supported?
+#
+# The check in section 5 is BRANCH-RELATIVE, and that is the hole this section
+# covers. Against the shipped image it reports `update_available: False` and
+# would do so forever: Alpine 3.19 is EOL and its APKINDEX is frozen at
+# Chromium 124, so "up to date within this branch" and "up to date" are the
+# same answer with opposite meanings.
+
+def test_current_branch_is_not_eol():
+    """The image is on v3.24 and v3.24 is stable -> branch_eol is False."""
+    result = _check(FakeClient(VERSIONS_ENV),
+                    make_apkindex([("chromium", "152.0.7977.82-r0")]))
+    assert result["branch_eol"] is False, result
+    assert result["stable_branch"] == "v3.24"
+    assert result["stable_version"] == "3.24.2"
+    assert result["branch_eol_error"] is None
+    assert "latest-releases.yaml" in result["source"]["stable"]
+
+
+def test_eol_branch_is_detected():
+    """THE test this whole section exists for.
+
+    The exact shipped situation: Alpine 3.19 / Chromium 124, where the branch
+    comparison is permanently satisfied and the browser is 2.5 years old. The
+    branch-relative answer is `False` and MUST stay `False` — but the EOL flag
+    has to be True, or nothing anywhere in the product ever says the base OS
+    is unsupported.
+    """
+    result = _check(FakeClient(LEGACY_PROBE),
+                    make_apkindex([("chromium", "124.0.6367.78-r0")]))
+    # The branch-relative comparison is unchanged and still says "up to date".
+    assert result["update_available"] is False, result
+    # The new field carries the fact the comparison structurally cannot.
+    assert result["branch_eol"] is True, result
+    assert result["stable_branch"] == "v3.24"
+    assert result["alpine_version"] == "3.19.9"
+    assert "v3.19" in result["note"], result["note"]
+    assert "v3.24" in result["note"]
+
+
+def test_caller_does_not_rebuild_an_eol_branch_even_when_an_update_exists():
+    """The EOL guard is checked BEFORE the version comparison, not after.
+
+    This is the case that would slip through if the guard were placed next to
+    the "up to date" branch instead of in front of it: an EOL branch that also
+    has a newer Chromium published for it. The version comparison says
+    "rebuild", and only the earlier guard stops it — because rebuilding v3.19
+    installs the newest Chromium v3.19 will ever publish, leaving the image
+    exactly as unpatched, and silently repinning the user's base OS is a
+    different decision than updating a package inside it.
+    """
+    status, cli = _run_real_updater(
+        {
+            "current": "124.0.6367.78", "latest": "125.0.1.2",
+            "branch_eol": True, "branch": "3.19", "stable_branch": "v3.24",
+        },
+        cli=_EOLCLI(chromium="124.0.6367.78", alpine="3.19.9"))
+    assert cli.built_tags() == [], (
+        "rebuilt a pinned EOL branch: a newer version on a frozen branch is a "
+        "1.31 GB no-op that leaves the image as unpatched (%r)"
+        % (cli.built_tags(),))
+    assert status["state"] == "base_eol", status
+    # The update is still RECORDED, so the user is not told there is nothing
+    # to do — they are told the base has to move first.
+    assert status["latest_version"] == "125.0.1.2", status
+    assert status["branch_eol"] is True
+
+
+def test_eol_never_flips_update_available():
+    """The two facts must stay separable in BOTH directions.
+
+    Folding EOL into `update_available` would ask the rebuild half to rebuild a
+    pinned, frozen branch: 1.31 GB of I/O to install the newest Chromium that
+    branch will ever publish, leaving the image exactly as unpatched. It is
+    also a silent repin of the user's base OS, which is a different decision
+    from updating a package and not one to make as a side effect.
+    """
+    # EOL and no Chromium update: the branch comparison says False, EOL True.
+    eol_no_update = _check(FakeClient(LEGACY_PROBE),
+                           make_apkindex([("chromium", "124.0.6367.78-r0")]))
+    assert eol_no_update["update_available"] is False
+    assert eol_no_update["branch_eol"] is True
+
+    # EOL *and* a real Chromium update on the old branch: still both reported
+    # independently, still no conflation in the other direction.
+    eol_with_update = _check(FakeClient(LEGACY_PROBE),
+                             make_apkindex([("chromium", "125.0.1.2-r0")]))
+    assert eol_with_update["update_available"] is True
+    assert eol_with_update["branch_eol"] is True
+
+    # Current branch with an update: the mirror image of the above.
+    current_with_update = _check(FakeClient(VERSIONS_ENV),
+                                 make_apkindex([("chromium", "153.0.2.1-r0")]))
+    assert current_with_update["update_available"] is True
+    assert current_with_update["branch_eol"] is False
+
+
+def test_point_release_bump_is_not_a_branch_change():
+    """`3.24.9` on a v3.24 stable is still v3.24 — no false EOL alarm."""
+    client = FakeClient("PROBE_SOURCE=versions.env\nALPINE_VERSION=3.24.9\n"
+                        "CHROMIUM_VERSION=152.0.7977.82\n")
+    result = _check(client, make_apkindex([("chromium", "152.0.7977.82-r0")]))
+    assert result["branch_eol"] is False, result
+
+
+def test_eol_lookup_failure_is_NONE_not_FALSE():
+    """THE tri-state test, and it is the mirror of section 5's.
+
+    A failed EOL lookup must yield None. `False` here would be a confident
+    "your base OS is supported" that nothing actually determined — the exact
+    conflation this module exists to eliminate, one level up from the Chromium
+    comparison. None is also what keeps the caller from mistaking a 3 KB
+    network blip for a supported platform.
+    """
+    for failure in (urllib.error.URLError("dns is down"),
+                    urllib.error.HTTPError("u", 500, "boom", {}, None),
+                    b"", b"not yaml at all",
+                    b"-\n  title: x\n  branch: not-a-branch\n",
+                    make_stable_releases("v3.24", "3.24.2",
+                                         extra_branches=("v3.99",))):
+        result = _check(FakeClient(VERSIONS_ENV),
+                        make_apkindex([("chromium", "152.0.7977.82-r0")]),
+                        stable=failure)
+        assert result["branch_eol"] is None, (failure[:40], result)
+        assert result["branch_eol_error"], \
+            "an undetermined branch must say why: %r" % (result,)
+
+
+def test_eol_lookup_failure_does_not_block_a_legitimate_update():
+    """A failed EOL lookup must not disturb the Chromium answer at all.
+
+    This is the "the new check is not mandatory for a positive result"
+    requirement, and it cuts both ways: the update is still detected, and
+    `error` — the channel `detector()` reads as "discard `latest`, do not
+    rebuild" — must stay clean. Overloading `error` with a failed side-lookup
+    would make the caller throw away a perfectly good version and skip a real
+    update.
+    """
+    result = _check(FakeClient(VERSIONS_ENV),
+                    make_apkindex([("chromium", "153.0.2.1-r0")]),
+                    stable=urllib.error.URLError("stable endpoint down"))
+    assert result["update_available"] is True, result
+    assert result["latest"] == "153.0.2.1-r0"
+    assert result["error"] is None, \
+        "a failed EOL lookup must not poison the Chromium error channel: %r" % (result,)
+    assert result["branch_eol"] is None
+    assert result["branch_eol_error"]
+
+
+def test_eol_lookup_failure_does_not_block_an_up_to_date_result():
+    """The other direction: it must not turn a determined False into None."""
+    result = _check(FakeClient(VERSIONS_ENV),
+                    make_apkindex([("chromium", "152.0.7977.82-r0")]),
+                    stable=urllib.error.URLError("stable endpoint down"))
+    assert result["update_available"] is False, result
+    assert result["error"] is None
+
+
+def test_missing_image_reports_eol_as_undetermined():
+    """Never "supported" for an image we could not even inspect."""
+    result = _check(FakeClient(VERSIONS_ENV, image_error=Exception("No such image")),
+                    make_apkindex(INDEX))
+    assert result["branch_eol"] is None, result
+    assert result["stable_branch"] is None
+
+
+def test_eol_lookup_is_not_attempted_for_an_unknown_arch():
+    """No arch -> no URL. It must be reported, not guessed at a default arch."""
+    client = FakeClient(VERSIONS_ENV, arch="sparc64")
+    calls = []
+    with _patched_urlopen(_serve(make_apkindex(INDEX), calls)):
+        result = check_chromium_update(
+            client, cache_path=os.path.join(tempfile.mkdtemp(), "c.json"))
+    assert result["branch_eol"] is None, result
+    assert _stable_calls(calls) == [], \
+        "queried the stable endpoint without a usable arch: %r" % (calls,)
+    assert result["branch_eol_error"]
+
+
+def test_stable_endpoint_uses_only_known_arch_path_segments():
+    """The arch becomes a URL path segment, so it is validated, not formatted."""
+    assert chromium_version._stable_releases_url("x86_64").endswith(
+        "/latest-stable/releases/x86_64/latest-releases.yaml")
+    for bogus in ("nope", "../../etc", "x86_64/../../..", "", "sparc64"):
+        assert chromium_version._stable_releases_url(bogus) is None, bogus
+
+
+def test_manifest_naming_two_branches_is_refused():
+    """A coin toss presented as a fact is worse than no answer at all."""
+    body = make_stable_releases("v3.24", "3.24.2", extra_branches=("v4.0",))
+    result = _check(FakeClient(VERSIONS_ENV),
+                    make_apkindex([("chromium", "152.0.7977.82-r0")]),
+                    stable=body)
+    assert result["branch_eol"] is None, result
+    assert "several branches" in result["branch_eol_error"]
+
+
+def test_is_branch_eol_is_tri_state():
+    for args, expected in (
+        (("3.19.9", "v3.24"), True),
+        (("v3.24", "v3.24"), False),
+        (("3.24.9", "3.24.2"), False),      # point release, not a branch change
+        (("3.25.0", "v3.24"), True),
+        ((None, "v3.24"), None),
+        (("v3.24", None), None),
+        ((None, None), None),
+        (("not-a-branch", "v3.24"), None),
+        (("v3.24", "not-a-branch"), None),
+    ):
+        assert chromium_version.is_branch_eol(*args) is expected, args
+
+
+def test_eol_lookup_respects_the_hard_deadline():
+    """Same rule as the index read: a hung server cannot wedge a check."""
+    class Drip(FakeResponse):
+        def __init__(self):
+            super().__init__(b"branch: v3.24\n" * 5000)
+        def read(self, size=-1):
+            time.sleep(0.01)
+            return self._buf.read(1)
+
+    def factory(request, timeout=None):
+        if "latest-releases.yaml" in request.full_url:
+            return Drip()
+        return FakeResponse(make_apkindex([("chromium", "152.0.7977.82-r0")]))
+
+    started = time.monotonic()
+    with _patched_urlopen(factory):
+        result = chromium_version.fetch_stable_branch("x86_64", timeout=0.3)
+    assert result["stable_branch"] is None
+    assert result["error"] and "deadline" in result["error"], result["error"]
+    assert time.monotonic() - started < 5.0
+
+
+def test_stable_manifest_is_size_capped():
+    """A misbehaving endpoint cannot make the check buffer without bound."""
+    class Flood(FakeResponse):
+        """Streams far more than the cap, in properly sized chunks.
+
+        Ignoring the requested size would let a single read blow past the cap
+        before the loop ever re-checked, which is the bug this guards.
+        """
+        def read(self, size=-1):
+            return b"branch: v3.24\n" * 8192      # 128 KB per read
+
+    with _patched_urlopen(lambda request, timeout=None: Flood(b"")):
+        result = chromium_version.fetch_stable_branch("x86_64")
+    assert result["stable_branch"] is None
+    assert "byte cap" in result["error"], result["error"]
+
+
+def test_stable_manifest_that_ignores_the_read_size_still_hits_the_cap():
+    """Even a single over-long read is rejected after the fact.
+
+    The loop checks the cap as it goes, but a hostile or broken `read()` may
+    hand back more than was asked for. The post-read check is what makes the
+    bound unconditional rather than a convention the endpoint is trusted to
+    honour.
+    """
+    class Greedy(FakeResponse):
+        """Ignores the requested read size entirely — a hostile endpoint."""
+        def read(self, size=-1):
+            return self._buf.read(4 * 1024 * 1024)
+
+    def flood(request, timeout=None):
+        if "latest-releases.yaml" in request.full_url:
+            return Greedy(b"branch: v3.24\n" * 500000)
+        return FakeResponse(make_apkindex([("chromium", "152.0.7977.82-r0")]))
+
+    with _patched_urlopen(flood):
+        result = chromium_version.fetch_stable_branch("x86_64")
+    assert result["stable_branch"] is None, result
+    assert "byte cap" in result["error"], result["error"]
+
+
+def test_stable_lookup_never_raises():
+    """A detector that raises is indistinguishable from one that found
+    nothing, as far as the rebuild half is concerned — so it must not raise."""
+    for exc in (Exception("boom"), urllib.error.URLError("down"),
+                OSError("socket gone"), MemoryError("oom"),
+                ValueError("nonsense")):
+        # `stable=exc` so the failure reaches the STABLE endpoint; the default
+        # is a valid manifest, which would answer the question and prove
+        # nothing about error handling.
+        with _patched_urlopen(_serve(make_apkindex(INDEX), stable=exc)):
+            try:
+                result = chromium_version.fetch_stable_branch("x86_64")
+            except Exception as escaped:          # pragma: no cover
+                raise AssertionError(
+                    "fetch_stable_branch raised %r for %r" % (escaped, exc))
+        assert result["stable_branch"] is None, exc
+        assert result["error"], exc
+
+
+def test_detector_passes_the_eol_advisory_through():
+    """The seam must forward the new field — that is the caller's only source."""
+    with _redirected_cache():
+        chromium_version.set_client_factory(lambda: FakeClient(LEGACY_PROBE))
+        try:
+            with _patched_urlopen(_serve(
+                    make_apkindex([("chromium", "124.0.6367.78-r0")]))):
+                result = detector("isolated-chrome")
+            assert result["branch_eol"] is True, result
+            assert result["stable_branch"] == "v3.24"
+            # The rebuild half still gets a clean answer for the build decision.
+            assert result["latest"] == "124.0.6367.78-r0"
+            assert result["update_available"] is False
+        finally:
+            chromium_version.set_client_factory(None)
+
+
+def test_detector_survives_a_missing_client_with_eol_undetermined():
+    def boom():
+        raise RuntimeError("no docker daemon")
+    with _redirected_cache():
+        chromium_version.set_client_factory(boom)
+        try:
+            result = detector("isolated-chrome")
+        finally:
+            chromium_version.set_client_factory(None)
+    assert result["branch_eol"] is None
+    assert result["stable_branch"] is None
+
+
+def test_eol_state_is_cached_with_the_rest_of_the_result():
+    """A cache hit must carry the EOL answer, not drop it.
+
+    The cached dict is replayed verbatim, so if the new fields were computed
+    outside the cached payload — or the payload were rebuilt field-by-field —
+    a hit would silently report `branch_eol: None` for an image known to be
+    on a dead branch. The first call is what tells us; the second must not
+    contradict it.
+    """
+    tmp = tempfile.mkdtemp(prefix="vercheck-")
+    cache = os.path.join(tmp, "cache.json")
+    calls = []
+    try:
+        body = make_apkindex([("chromium", "124.0.6367.78-r0")])
+        with _patched_urlopen(_serve(body, calls)):
+            first = check_chromium_update(FakeClient(LEGACY_PROBE), cache_path=cache)
+            second = check_chromium_update(FakeClient(LEGACY_PROBE), cache_path=cache)
+        assert first["from_cache"] is False
+        assert second["from_cache"] is True
+        assert first["branch_eol"] is True
+        assert second["branch_eol"] is True, \
+            "the cache hit lost the branch-EOL answer"
+        assert second["stable_branch"] == "v3.24"
+        # And no network was needed to produce it a second time.
+        assert len(_index_calls(calls)) == 1
+        assert len(_stable_calls(calls)) == 1
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_a_failed_eol_lookup_is_not_cached_for_the_full_interval():
+    """A partial failure is retried on the SHORT schedule.
+
+    Pinning `branch_eol: None` for 12 h would hide the exact condition the
+    field exists to surface, on the strength of a 3 KB endpoint having hiccuped
+    once. The whole entry is re-checked after ERROR_RETRY_INTERVAL_SECONDS
+    instead, which is the same discipline the Chromium failure path already
+    uses and why that constant exists.
+    """
+    tmp = tempfile.mkdtemp(prefix="vercheck-")
+    cache = os.path.join(tmp, "cache.json")
+    calls = []
+    try:
+        t0 = 1_700_000_000.0
+        body = make_apkindex([("chromium", "152.0.7977.82-r0")])
+        with _patched_urlopen(_serve(
+                body, calls, stable=urllib.error.URLError("flaky"))):
+            first = check_chromium_update(
+                FakeClient(VERSIONS_ENV), cache_path=cache, now=t0)
+            # Still inside the normal 12 h interval, but well past the 30 min
+            # retry gap: a partial failure must NOT be trusted for 12 h.
+            check_chromium_update(
+                FakeClient(VERSIONS_ENV), cache_path=cache,
+                now=t0 + ERROR_RETRY_INTERVAL_SECONDS + 60)
+        assert first["branch_eol"] is None
+        assert first["update_available"] is False, \
+            "the Chromium answer was disturbed by the EOL failure"
+        assert len(_stable_calls(calls)) == 2, \
+            "a failed EOL lookup was cached for the full 12 h interval"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_a_successful_eol_lookup_is_cached_for_the_full_interval():
+    """The happy path must NOT re-fetch every 30 minutes."""
+    tmp = tempfile.mkdtemp(prefix="vercheck-")
+    cache = os.path.join(tmp, "cache.json")
+    calls = []
+    try:
+        t0 = 1_700_000_000.0
+        body = make_apkindex([("chromium", "152.0.7977.82-r0")])
+        with _patched_urlopen(_serve(body, calls)):
+            check_chromium_update(FakeClient(VERSIONS_ENV), cache_path=cache, now=t0)
+            check_chromium_update(
+                FakeClient(VERSIONS_ENV), cache_path=cache,
+                now=t0 + ERROR_RETRY_INTERVAL_SECONDS + 60)
+        assert len(_stable_calls(calls)) == 1, \
+            "a successful EOL lookup re-fetched on the short schedule"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ═══════════════════════════════════════════════════ 6c. the caller's decision
+
+class _EOLCLI:
+    """Records `docker` calls; never builds anything.
+
+    `chromium` is what `versions.env` reports for the INSTALLED image, which
+    `image_update` treats as authoritative for "current" — a detector cannot
+    override it. It is parameterised so a test can set up "installed X,
+    published X" without the fake quietly disagreeing and turning an
+    up-to-date case into an update-available one.
+    """
+
+    def __init__(self, chromium="124.0.6367.78", alpine="3.19.9"):
+        self.chromium = chromium
+        self.alpine = alpine
+        self.calls = []
+
+    def __call__(self, cmd, env=None, timeout=None):
+        self.calls.append(list(cmd))
+        script = cmd[-1] if cmd[1:2] == ["run"] else ""
+        if "versions.env" in script and "VERIFY_OK" not in script:
+            return 0, f"ALPINE_VERSION={self.alpine}\nCHROMIUM_VERSION={self.chromium}\n", ""
+        if "VERIFY_OK" in script:
+            return 0, f"CHROMIUM_VERSION={self.chromium}\nVERIFY_OK\n", ""
+        return 0, "", ""
+
+    def built_tags(self):
+        return [c[3] for c in self.calls if c[1] == "build" and c[2] == "-t"]
+
+
+def _run_real_updater(detector_result, cli=None, **kwargs):
+    """Drive the REAL ImageUpdater with a detector that returns `detector_result`."""
+    import image_update
+    tmp = tempfile.mkdtemp(prefix="vercheck-eol-")
+    cli = cli or _EOLCLI()
+    try:
+        updater = image_update.ImageUpdater(
+            client_factory=lambda: _NoContainers(),
+            run_cmd=cli,
+            detector=lambda image: detector_result,
+            lock_file=os.path.join(tmp, "l"),
+            state_file=os.path.join(tmp, "s"),
+            **kwargs,
+        )
+        updater.check_and_start(force=kwargs.get("force", False))
+        assert updater.wait_for_idle(30), "worker did not finish"
+        return updater.get_update_status(), cli
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_caller_surfaces_eol_as_its_own_state_and_does_not_rebuild():
+    """What the caller does with an EOL branch, and why.
+
+    The preference: a distinct, actionable state, NOT a silent auto-upgrade of
+    the pinned base. Two independent reasons are asserted here rather than
+    just described:
+
+      * it does not build, because rebuilding v3.19 installs the newest
+        Chromium v3.19 will ever publish and leaves the image as unpatched;
+      * it does not rebuild, and does not claim success, because it also does
+        not silently move the user to a different Alpine branch — that changes
+        the base OS under their profiles, which is a bigger decision than
+        updating a package and must not ride along on a "Chromium update".
+    """
+    status, cli = _run_real_updater({
+        "current": "124.0.6367.78", "latest": "124.0.6367.78-r0",
+        "update_available": False,
+        "branch_eol": True, "branch": "v3.19", "alpine_version": "3.19.9",
+        "stable_branch": "v3.24",
+    })
+    assert status["state"] == "base_eol", status
+    assert cli.built_tags() == [], "an EOL branch must not trigger a rebuild"
+    # Actionable: the message names the branch, the replacement, and the fact
+    # that the current one is frozen.
+    notice = status["base_eol_notice"]
+    assert "3.19" in notice and "v3.24" in notice, notice
+    assert "no longer supported" in notice, notice
+    assert "3.19" in status["base_eol_notice_short"], status
+    assert status["branch_eol"] is True
+
+
+def test_caller_reports_up_to_date_when_the_branch_is_current():
+    """The new state must not swallow the ordinary path."""
+    status, cli = _run_real_updater(
+        {
+            "current": "152.0.7977.82", "latest": "152.0.7977.82",
+            "branch_eol": False, "branch": "v3.24", "stable_branch": "v3.24",
+        },
+        cli=_EOLCLI(chromium="152.0.7977.82", alpine="3.24.2"))
+    assert status["state"] == "up_to_date", status
+    assert status["branch_eol"] is False
+    assert cli.built_tags() == []
+
+
+def test_caller_ignores_an_undetermined_eol_flag_entirely():
+    """None must behave exactly like the pre-existing, no-EOL world.
+
+    This is the "the new check is not mandatory" guarantee on the caller side:
+    an EOL lookup that failed must not change what gets built.
+    """
+    status, cli = _run_real_updater(
+        {
+            "current": "152.0.7977.82", "latest": "153.0.2.1", "branch_eol": None,
+        },
+        cli=_EOLCLI(chromium="152.0.7977.82", alpine="3.24.2"))
+    assert status["state"] == "update_available", status
+    assert status["branch_eol"] is None
+    # Nothing built: consent is still required. The EOL flag changed nothing.
+    assert cli.built_tags() == []
+    assert status["consent_required"] is True
+
+
+def test_caller_never_coerces_a_non_bool_eol_flag_to_false():
+    """A falsy non-bool is NOT a determination.
+
+    `branch_eol: 0` / `""` / `"false"` from a sloppy detector must read as
+    "unknown", never as "supported". The update path must then proceed
+    exactly as if the key were absent.
+    """
+    for bogus in (0, "", "false", [], {}):
+        status, cli = _run_real_updater(
+            {
+                "current": "152.0.7977.82", "latest": "152.0.7977.82",
+                "branch_eol": bogus,
+            },
+            cli=_EOLCLI(chromium="152.0.7977.82", alpine="3.24.2"))
+        assert status["state"] == "up_to_date", (bogus, status)
+        assert status["branch_eol"] is None, (bogus, status)
+
+
+def test_caller_reports_base_eol_even_when_the_version_is_also_unknown():
+    """EOL is a positive fact; it does not wait on the version comparison."""
+    status, cli = _run_real_updater(
+        {
+            "current": "124.0.6367.78", "latest": None,
+            "branch_eol": True, "branch": "3.19", "stable_branch": "v3.24",
+        },
+        cli=_EOLCLI(chromium="124.0.6367.78", alpine="3.19.9"))
+    assert status["state"] == "base_eol", status
+    assert cli.built_tags() == []
+
+
+def test_caller_still_honours_an_explicit_forced_rebuild_on_an_eol_branch():
+    """`base_eol` is a report, not a veto.
+
+    The user can always ask for a rebuild explicitly. The point of not
+    auto-rebuilding is that auto-changing someone's base OS is a decision, not
+    that the tool is forbidden from doing what they asked.
+    """
+    import image_update
+    tmp = tempfile.mkdtemp(prefix="vercheck-eol-force-")
+    cli = _EOLCLI(chromium="124.0.6367.78", alpine="3.19.9")
+    try:
+        updater = image_update.ImageUpdater(
+            client_factory=lambda: _NoContainers(), run_cmd=cli,
+            detector=lambda image: {
+                "current": "124.0.6367.78", "latest": "124.0.6367.78",
+                "branch_eol": True, "branch": "3.19", "stable_branch": "v3.24"},
+            lock_file=os.path.join(tmp, "l"),
+            state_file=os.path.join(tmp, "s"),
+        )
+        updater.check_and_start(force=True)
+        assert updater.wait_for_idle(30)
+        assert len(cli.built_tags()) == 1, "an explicit force must still build"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_base_eol_is_a_recognised_state_everywhere_it_is_validated():
+    """An unlisted state silently degrades to 'idle' in `_write_state`."""
+    import image_update
+    assert "base_eol" in image_update.STATES
+    assert "base_eol" in image_update._STATES
+    tmp = tempfile.mkdtemp(prefix="vercheck-eol-state-")
+    try:
+        updater = image_update.ImageUpdater(
+            client_factory=lambda: _NoContainers(), run_cmd=_EOLCLI(),
+            lock_file=os.path.join(tmp, "l"),
+            state_file=os.path.join(tmp, "s"),
+        )
+        updater._write_state(state="base_eol", last_result="x")
+        assert updater.get_update_status()["state"] == "base_eol", \
+            "base_eol was rejected and rewritten to idle"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_status_always_exposes_the_eol_fields():
+    """Always-present, so the renderer never has to guard a missing key."""
+    import image_update
+    tmp = tempfile.mkdtemp(prefix="vercheck-eol-keys-")
+    try:
+        updater = image_update.ImageUpdater(
+            client_factory=lambda: _NoContainers(), run_cmd=_EOLCLI(),
+            lock_file=os.path.join(tmp, "l"),
+            state_file=os.path.join(tmp, "s"),
+        )
+        status = updater.get_update_status()
+        for key in ("branch_eol", "base_eol_notice", "base_eol_notice_short"):
+            assert key in status, f"missing documented key {key}: {status}"
+        # Default is None (undetermined), NOT False.
+        assert status["branch_eol"] is None, status
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_base_eol_notice_has_no_unfilled_placeholders():
+    """A `{branch}` reaching the UI is worse than a vaguer sentence."""
+    import image_update
+    for template in (image_update.BASE_EOL_NOTICE,
+                     image_update.BASE_EOL_NOTICE_SHORT):
+        text = template.replace("{branch}", "3.19").replace("{stable}", "v3.24")
+        assert "{" not in text and "}" not in text, template
+        assert "3.19" in text and "v3.24" in text
+
+
 # ═════════════════════════════════════════════════ 7. caching
 
 def test_second_call_within_the_interval_does_no_network_call():
@@ -663,7 +1343,12 @@ def test_second_call_within_the_interval_does_no_network_call():
         assert first["from_cache"] is False
         assert second["from_cache"] is True
         assert second["update_available"] is False
-        assert len(calls) == 1, "network hit %d times inside the interval" % len(calls)
+        # One check = one index read + one stable-branch read. A second check
+        # inside the interval must add NEITHER.
+        assert len(_index_calls(calls)) == 1, \
+            "index network hit %d times inside the interval" % len(_index_calls(calls))
+        assert len(_stable_calls(calls)) == 1, \
+            "stable-branch network hit %d times inside the interval" % len(_stable_calls(calls))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -679,10 +1364,13 @@ def test_cache_expires_after_the_interval():
             check_chromium_update(FakeClient(VERSIONS_ENV), cache_path=cache, now=t0)
             check_chromium_update(FakeClient(VERSIONS_ENV), cache_path=cache,
                                   now=t0 + VERSION_CHECK_INTERVAL_SECONDS - 60)
-            assert len(calls) == 1
+            assert len(_index_calls(calls)) == 1
+            assert len(_stable_calls(calls)) == 1
             check_chromium_update(FakeClient(VERSIONS_ENV), cache_path=cache,
                                   now=t0 + VERSION_CHECK_INTERVAL_SECONDS + 60)
-        assert len(calls) == 2, "check did not run again after the interval"
+        assert len(_index_calls(calls)) == 2, "check did not run again after the interval"
+        assert len(_stable_calls(calls)) == 2, \
+            "the EOL lookup is not on the same cache schedule as the index"
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -707,7 +1395,7 @@ def test_cache_is_invalidated_when_the_image_id_changes():
         assert first["from_cache"] is False
         assert second["from_cache"] is False, "served a stale cache for a new image"
         assert second["image_id"] == "sha256:new"
-        assert len(calls) == 2
+        assert len(_index_calls(calls)) == 2
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -722,17 +1410,21 @@ def test_failed_checks_are_cached_briefly_not_for_the_full_interval():
         with _patched_urlopen(_serve(urllib.error.URLError("down"), calls)):
             first = check_chromium_update(FakeClient(VERSIONS_ENV), cache_path=cache, now=t0)
             # One attempt probes every repo, so a full miss is len(ALPINE_REPOS)
-            # requests, not one.
+            # index requests, not one. The stable-branch lookup adds exactly one
+            # more, and a failure there must not lengthen the retry gap either.
             per_attempt = len(chromium_version.ALPINE_REPOS)
-            assert len(calls) == per_attempt, calls
+            assert len(_index_calls(calls)) == per_attempt, calls
+            assert len(_stable_calls(calls)) == 1, calls
             again = check_chromium_update(FakeClient(VERSIONS_ENV), cache_path=cache,
                                           now=t0 + 60)
             assert again["from_cache"] is True
-            assert len(calls) == per_attempt, "a cached failure still hit the network"
+            assert len(_index_calls(calls)) == per_attempt, "a cached failure still hit the network"
+            assert len(_stable_calls(calls)) == 1, "a cached failure re-hit the EOL endpoint"
             check_chromium_update(FakeClient(VERSIONS_ENV), cache_path=cache,
                                   now=t0 + ERROR_RETRY_INTERVAL_SECONDS + 60)
-        assert len(calls) == 2 * per_attempt, \
+        assert len(_index_calls(calls)) == 2 * per_attempt, \
             "a failed check stayed cached past the retry gap"
+        assert len(_stable_calls(calls)) == 2
         assert first["update_available"] is None
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -860,7 +1552,7 @@ def test_corrupt_cache_degrades_to_a_fresh_check():
             result = check_chromium_update(FakeClient(VERSIONS_ENV), cache_path=cache)
         assert result["from_cache"] is False
         assert result["update_available"] is False
-        assert len(calls) == 1
+        assert len(_index_calls(calls)) == 1
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1179,6 +1871,54 @@ MUTATIONS = [
      "    if not match:\n        return None",
      "    match = _BRANCH_RE.match(str(value).strip())\n"
      "    if not match:\n        return 'v' + str(value).strip()"),
+    # ── branch EOL ────────────────────────────────────────────────────────
+    ("branch EOL check removed entirely (the gap being fixed)",
+     "    branch_eol = is_branch_eol(branch, stable_branch)",
+     "    branch_eol = None"),
+    ("EOL lookup failure collapsed to False (claims 'supported')",
+     "    branch_eol = is_branch_eol(branch, stable_branch)",
+     "    branch_eol = (False if stable_branch is None\n"
+     "                  else is_branch_eol(branch, stable_branch))"),
+    ("EOL folded into update_available (triggers a pointless rebuild)",
+     "        \"branch_eol\": branch_eol,",
+     "        \"branch_eol\": branch_eol,\n"
+     "        \"update_available\": True if branch_eol else available,"),
+    ("EOL error overloading the Chromium error channel",
+     "    branch_eol_error = stable.get(\"error\")",
+     "    branch_eol_error = stable.get(\"error\")\n"
+     "    if branch_eol_error:\n        error = branch_eol_error"),
+    ("stable-branch lookup not cached on the normal schedule",
+     "    failed = bool(result.get(\"error\")) or bool(result.get(\"branch_eol_error\"))",
+     "    failed = bool(result.get(\"error\"))"),
+    ("branch EOL never reported as a distinct caller state",
+     "            if branch_eol and not force:",
+     "            if False and branch_eol and not force:",
+     "image_update.py"),
+    ("caller silently rebuilds the pinned EOL branch",
+     # Records base_eol and then FALLS THROUGH instead of returning, having
+     # set force: the naive "report it and fix it anyway" design. With a
+     # newer Chromium published on the frozen branch this reaches the build
+     # path and rebuilds the user's pinned base as a side effect.
+     "                    next_attempt_at=started + self._min_interval,\n"
+     "                )\n"
+     "                return\n",
+     "                    next_attempt_at=started + self._min_interval,\n"
+     "                )\n"
+     "                force = True\n",
+     "image_update.py"),
+    ("caller coerces a non-bool branch_eol to False",
+     "    return value if isinstance(value, bool) else None",
+     "    return bool(value)",
+     "image_update.py"),
+    ("unvalidated stable_branch compared as unequal (false EOL alarm)",
+     "    if not current or not stable:\n        return None",
+     "    if not current:\n        return None"),
+    ("stable manifest arch path segment no longer validated",
+     "    if arch not in _ARCH_MAP.values():\n        return None",
+     "    if not arch:\n        return None"),
+    ("stable manifest agreement check dropped",
+     "    if len(branches) > 1:",
+     "    if False:"),
 ]
 
 
@@ -1245,7 +1985,7 @@ def test_control_run_actually_executes_the_tests():
         shutil.rmtree(_scratch_of(mutant_test), ignore_errors=True)
 
 
-def _mutant_scratch(replace_find=None, replace_with=None):
+def _mutant_scratch(replace_find=None, replace_with=None, module="chromium_version.py"):
     """Build a scratch tree containing a (possibly mutated) copy of backend/.
 
     The copy of THIS TEST FILE goes into the scratch tree too, and that is
@@ -1256,20 +1996,26 @@ def _mutant_scratch(replace_find=None, replace_with=None):
     mutation trivially "passes". Deriving ROOT from a file *inside* the scratch
     tree is what makes the mutated module the one under test — the same trick
     test_image_update.py uses, and for the same reason.
+
+    `module` names which backend file to patch. Most mutations target the
+    detector, but the caller's handling of an EOL branch is a separate set of
+    decisions with its own failure modes, and those are only testable if the
+    caller can be mutated independently.
     """
     scratch = tempfile.mkdtemp(prefix="mutant-")
-    shutil.copytree(os.path.join(ROOT, "backend"), os.path.join(scratch, "backend"))
+    shutil.copytree(os.path.join(ROOT, "backend"), os.path.join(scratch, "backend"),
+                    ignore=shutil.ignore_patterns("__pycache__"))
     os.makedirs(os.path.join(scratch, "tests"), exist_ok=True)
     mutant_test = os.path.join(scratch, "tests", "test_version_check.py")
     shutil.copy2(os.path.abspath(__file__), mutant_test)
 
     if replace_find is not None:
-        target = os.path.join(scratch, "backend", "chromium_version.py")
+        target = os.path.join(scratch, "backend", module)
         with open(target) as handle:
             source = handle.read()
         if replace_find not in source:
             shutil.rmtree(scratch, ignore_errors=True)
-            return None, "PATCH DID NOT APPLY (%r absent)" % replace_find
+            return None, "PATCH DID NOT APPLY to %s (%r absent)" % (module, replace_find)
         with open(target, "w") as handle:
             handle.write(source.replace(replace_find, replace_with, 1))
     return mutant_test, None
@@ -1292,8 +2038,12 @@ def test_mutations_are_detected():
         pytest.skip("self-referential: skipped in a child run")
 
     survivors = []
-    for label, find, replace in MUTATIONS:
-        mutant_test, problem = _mutant_scratch(find, replace)
+    for entry in MUTATIONS:
+        # The 4th element, when present, names the backend file to mutate;
+        # most mutations target the detector, the caller-decision ones do not.
+        label, find, replace = entry[0], entry[1], entry[2]
+        module = entry[3] if len(entry) > 3 else "chromium_version.py"
+        mutant_test, problem = _mutant_scratch(find, replace, module=module)
         if mutant_test is None:
             survivors.append("%s: %s" % (label, problem))
             continue

@@ -34,11 +34,20 @@ contextBridge.exposeInMainWorld('api', {
     onMaximizeChange: (cb) => ipcRenderer.on('window:maximized', (_e, state) => cb(state)),
   },
 
-  // Chromium auto-update. `check()` starts a rebuild and resolves immediately
-  // (the build itself runs on a backend background thread), and `status()`
-  // is a cheap read the UI can poll to show progress.
+  // Chromium update — DETECT AND INFORM, REBUILD ONLY ON CONSENT.
+  //
+  // `check()` runs a version check and resolves immediately. It BUILDS
+  // NOTHING: it records `update_available` and stops. `apply(version)` is the
+  // explicit "Apply now" the user invokes, and `version` must be the
+  // `consent_version` from the last `status()` — consent is tied to one
+  // specific version, not a blanket opt-in to updates.
+  //
+  // `status()` returns the full contract documented on the `image:updateStatus`
+  // handler in main.js. Note `update_available` is tri-state: true, false, or
+  // null for "could not determine" — do not render null as "up to date".
   image: {
     check:  ()              => ipcRenderer.invoke('image:checkUpdate'),
+    apply:  (version)       => ipcRenderer.invoke('image:applyUpdate', version),
     status: ()              => ipcRenderer.invoke('image:updateStatus'),
   },
 
