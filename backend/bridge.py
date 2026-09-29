@@ -39,12 +39,24 @@ _METHODS = {
     "add_proxy":       lambda p: proxy_store.add_proxy(p["name"], p["url"]),
     "delete_proxy":    lambda p: proxy_store.delete_proxy(p["name"]),
 
-    # Chromium auto-update. `image_update_check` STARTS work and RETURNS
-    # IMMEDIATELY — the rebuild happens on a background thread, so no caller
-    # ever waits on a build. `image_update_status` is a cheap in-memory read
-    # for the UI to poll. Neither touches Docker on the request path.
+    # Chromium update — DETECT AND INFORM, REBUILD ONLY ON CONSENT.
+    #
+    # `image_update_check` runs a version check on a background thread and
+    # RETURNS IMMEDIATELY. Under the default policy it BUILDS NOTHING: it
+    # records `update_available` (with current + latest) and stops. A rebuild
+    # requires `image_update_apply`, which a human invokes.
+    #
+    # `image_update_apply` is the consent gate. `version` must match the
+    # version the status reports as available — consent is tied to a specific
+    # version, never a blanket "yes to updates". If the version moved between
+    # the check and the click, it builds nothing and the UI must ask again.
+    #
+    # `image_update_status` is a cheap in-memory read for the UI to poll.
+    # None of the three touches Docker on the request path.
     "image_update_check":  lambda p: image_update.check_and_start(
-        force=(True if p.get("force") else None), reason=p.get("reason", "manual")),
+        reason=p.get("reason", "manual")),
+    "image_update_apply":  lambda p: image_update.apply_update(
+        version=p.get("version"), reason="user_consent"),
     "image_update_status": lambda p: image_update.get_update_status(),
 }
 

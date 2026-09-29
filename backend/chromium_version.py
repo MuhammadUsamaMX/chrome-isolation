@@ -76,6 +76,39 @@ It is not hardcoded: `community` is tried first, then `main`, and the repo the
 answer came from is reported. If upstream ever moves the package, this keeps
 working. A branch that has neither simply reports "could not check".
 
+BRANCH END-OF-LIFE — WHY THE CHECK ABOVE IS NOT ENOUGH
+------------------------------------------------------
+The comparison above is BRANCH-RELATIVE, and that is a real hole rather than a
+technicality. Measured against the shipped image: `124.0.6367.78` installed,
+`124.0.6367.78-r0` published for its own branch, so `update_available` is
+`False` — and would stay `False` forever. The image's branch is Alpine 3.19,
+which is EOL and frozen: its APKINDEX will never gain another Chromium, so
+"up to date within this branch" and "up to date" are the same string with
+completely different meanings, and only the first one is true.
+
+So this module also answers a second, separate question: is the image's Alpine
+branch still the current stable one?
+
+    https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/<arch>/latest-releases.yaml
+
+Verified, not assumed:
+  * The bare directory listing `.../alpine/latest-stable/` returns 200 and 480
+    bytes, but it lists only `community/`, `main/`, `releases/` — the branch is
+    a symlink the CDN resolves for us, so the listing does NOT name it. It is
+    useless for this question and would have been the obvious wrong choice.
+  * `.../alpine/latest-stable/releases/latest-releases.yaml` (arch-less) is
+    404. The file is per-arch.
+  * The per-arch file exists and carries the answer as a plain `branch:`
+    field. Measured over 7 requests on x86_64: 3,320 bytes, median 0.99 s, and
+    1.2–4.2 KB across every architecture Alpine ships. Against the 0.20 MB /
+    0.54 s streaming APKINDEX read this is ~1.6% of the bytes, so it is
+    genuinely negligible and is cached on exactly the same schedule.
+
+The file is a YAML list of release stanzas whose `branch:` is constant across
+the whole document. Every `branch:` line is read and they must all agree: a
+disagreement is a real upstream change, and guessing which one is current is
+the failure mode this module exists to avoid.
+
 THE RETURN CONTRACT
 -------------------
 `check_chromium_update()` returns a dict, and NEVER raises. It always has
@@ -84,6 +117,10 @@ these keys:
     current           str | None   version installed in the image
     latest            str | None   newest version published for its branch
     update_available  bool | None  True / False / **None = UNKNOWN**
+    branch_eol        bool | None  True / False / **None = UNKNOWN** (see below)
+    stable_branch     str | None   current stable branch, e.g. "v3.24"
+    stable_version    str | None   stable branch's point release, e.g. "3.24.2"
+    branch_eol_error  str | None   why `branch_eol` is UNKNOWN
     checked_at        float | None unix epoch of the check
     source            dict         provenance, per value
     error             str | None   why the answer is UNKNOWN
@@ -110,8 +147,36 @@ displayed as healthy, which is the single worst outcome this feature has.
 reports no update and builds nothing); this module is the reason that
 fail-closed path is reachable at all.
 
+`branch_eol` follows the SAME tri-state discipline and is deliberately a
+SEPARATE field rather than being folded into `update_available`:
+
+    True   -> the image's branch is positively known NOT to be the current
+              stable one. Frozen: no further Chromium will ever be published
+              for it, and no security fixes reach it.
+    False  -> the image's branch IS the current stable one.
+    None   -> NOT DETERMINED: no image, no network, no arch to build the URL
+              from, an unparsable file, or branches that disagree. The reason
+              is in `branch_eol_error`.
+
+Why it is NOT folded in. Flipping `update_available` to True on an EOL branch
+would ask the rebuild half to rebuild the user's PINNED OLD BRANCH — which
+installs the newest Chromium that branch will ever publish and leaves it just
+as unpatched, at the cost of 1.31 GB. Worse, it is a silent side effect of a
+"Chromium update": changing the user's base OS is a different decision from
+changing a package inside a branch, and it is not this module's decision to
+make. The caller has to be told the fact and choose.
+
+`branch_eol` is strictly ADVISORY and strictly NON-BLOCKING. It is computed
+after the Chromium comparison and can never change it: if the EOL lookup
+fails, the comparison result is exactly what it would have been, and
+`update_available` is unaffected. A failed EOL lookup is also deliberately
+NOT recorded in `error` — `error` means "the Chromium answer is unknown", and
+overloading it would make `image_update` throw away a perfectly good `latest`
+and skip a legitimate update.
+
 A caller that wants to act on the answer should branch on `update_available is
-True` only, and surface `error` verbatim when it is None.
+True` only, and surface `error` verbatim when it is None. `branch_eol` is
+reported alongside for the caller to act on *separately*.
 """
 from __future__ import annotations
 
@@ -170,6 +235,30 @@ VERSIONS_ENV_PATH = "/usr/local/share/chrome-isolation/versions.env"
 #: Alpine CDN base. The branch and arch are validated and appended, never
 #: interpolated raw.
 ALPINE_CDN_BASE = "https://dl-cdn.alpinelinux.org/alpine"
+
+#: Where Alpine publishes the CURRENT STABLE branch. `latest-stable` is a
+#: symlink the CDN resolves, so the directory listing at that path does NOT
+#: name the branch — measured, it returns only community/ main/ releases/.
+#: The release manifest beneath it does, in a plain `branch:` field, and is
+#: 1.2-4.2 KB. It is per-arch; the arch-less form is a measured 404.
+#:
+#: The arch goes through `_ARCH_MAP` and is re-validated against it here, so
+#: it is still a known-constant value at the point it becomes a path segment.
+ALPINE_STABLE_RELEASES_URL = (
+    ALPINE_CDN_BASE + "/latest-stable/releases/{arch}/latest-releases.yaml"
+)
+
+#: The stable-release manifest is 1.2-4.2 KB in practice. This is a backstop
+#: against a misbehaving endpoint, several orders of magnitude above the real
+#: size, not a budget the design spends.
+MAX_STABLE_BYTES = 1024 * 1024
+
+#: Every `branch:` in the manifest must agree, so a document naming two is
+#: rejected rather than guessed at. Indented, because the real file is a YAML
+#: sequence and its keys sit two spaces in — measured on the live endpoint, not
+#: assumed, and an unanchored `^` here would silently match nothing.
+_STABLE_BRANCH_RE = re.compile(r"^[ \t]*branch:[ \t]*(\S+)[ \t]*$", re.MULTILINE)
+_STABLE_VERSION_RE = re.compile(r"^[ \t]*version:[ \t]*(\S+)[ \t]*$", re.MULTILINE)
 
 #: Repositories to try, in order. `chromium` is in `community` on every branch
 #: checked (3.19, 3.24); `main` is a fallback, not a guess about the future.
@@ -595,6 +684,177 @@ def fetch_latest_version(branch: Optional[str], arch: Optional[str],
 
 
 # ---------------------------------------------------------------------------
+# Discovering the current STABLE branch (is the image's branch EOL?)
+# ---------------------------------------------------------------------------
+
+def _stable_releases_url(arch: str) -> str:
+    """The per-arch stable-release manifest URL, or None for an unknown arch.
+
+    `arch` is checked against the values `_ARCH_MAP` can produce rather than
+    formatted blindly: this string becomes a URL path segment, and the arch
+    never originates from the image itself (it comes from `docker inspect`'s
+    `Architecture`, funnelled through the map), so an unmapped value means
+    "we do not recognise this platform", not "try it and see".
+    """
+    if arch not in _ARCH_MAP.values():
+        return None
+    return ALPINE_STABLE_RELEASES_URL.format(arch=arch)
+
+
+def fetch_stable_branch(arch: Optional[str],
+                        timeout: float = NETWORK_TIMEOUT_SECONDS
+                        ) -> Dict[str, Any]:
+    """Which Alpine branch is currently stable, and at what point release.
+
+    Returns `{"stable_branch": str|None, "stable_version": str|None,
+    "source": str|None, "error": str|None}`. Never raises.
+
+    This is what makes `branch_eol` answerable. It is deliberately a SEPARATE,
+    tiny request rather than a flag on the APKINDEX read: the index lookup
+    early-exits as soon as the `chromium` stanza appears, so a branch that is
+    merely OLD looks identical to a current one, and there is nothing in the
+    index that says which branch Alpine considers current.
+
+    Cost, measured over 7 requests (x86_64): 3,320 bytes, median 0.99 s
+    against the 0.20 MB / 0.54 s streaming index read — about 1.6% of the
+    bytes. Cached on the same 12 h schedule as the index, so the amortised
+    cost is a rounding error.
+
+    Reading is a single bounded `read()` under an explicit monotonic deadline:
+    `urllib`'s timeout is per socket operation and does not bound elapsed
+    time, exactly as in `_iter_index_versions`.
+    """
+    out: Dict[str, Any] = {
+        "stable_branch": None, "stable_version": None,
+        "source": None, "error": None,
+    }
+    if not arch:
+        out["error"] = ("could not determine the image architecture, so there "
+                        "is no stable-release manifest to query; the branch's "
+                        "support status cannot be determined")
+        return out
+    url = _stable_releases_url(arch)
+    if not url:
+        out["error"] = (f"{arch!r} is not an architecture this module queries, "
+                        "so the branch's support status cannot be determined")
+        return out
+
+    started = time.monotonic()
+    request = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
+    try:
+        response = urllib.request.urlopen(request, timeout=timeout)
+    except urllib.error.HTTPError as exc:
+        out["error"] = f"{url} returned HTTP {exc.code}"
+        return out
+    except urllib.error.URLError as exc:
+        out["error"] = f"{url} could not be fetched: {exc.reason}"
+        return out
+    except Exception as exc:
+        out["error"] = f"{url} could not be fetched: {exc}"
+        return out
+
+    try:
+        # Chunked, not one big `read()`. urllib's timeout is per socket
+        # operation, so a server that dribbles one byte per interval inside a
+        # single read() would never trip it — the deadline is only meaningful if
+        # it is checked BETWEEN reads, which is exactly what `_iter_index_versions`
+        # does for the same reason.
+        chunks = []
+        while True:
+            if time.monotonic() - started > timeout:
+                out["error"] = (f"{url} exceeded the {timeout:g}s deadline "
+                                f"after {sum(len(c) for c in chunks)} bytes")
+                return out
+            chunk = response.read(65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            if sum(len(c) for c in chunks) > MAX_STABLE_BYTES:
+                out["error"] = f"{url} exceeded the {MAX_STABLE_BYTES} byte cap"
+                return out
+    except Exception as exc:
+        # A read that fails is "could not determine", never a guess.
+        out["error"] = f"{url} read failed: {exc}"
+        return out
+    finally:
+        try:
+            response.close()
+        except Exception:
+            pass
+
+    body = b"".join(chunks)
+    # The loop above already checks the cap per read, but a hostile or broken
+    # `read()` may hand back more than was asked for. This makes the bound
+    # unconditional rather than a convention the endpoint is trusted to honour.
+    if len(body) > MAX_STABLE_BYTES:
+        out["error"] = f"{url} exceeded the {MAX_STABLE_BYTES} byte cap"
+        return out
+
+    try:
+        text = body.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        out["error"] = f"{url} is not valid UTF-8: {exc}"
+        return out
+
+    branches = set(_STABLE_BRANCH_RE.findall(text))
+    if not branches:
+        out["error"] = f"{url} contains no branch: field, so the current stable branch is undetermined"
+        return out
+    if len(branches) > 1:
+        # The manifest has one branch per document and they are all the same.
+        # A disagreement means upstream changed shape, and picking one would be
+        # a coin toss presented as a fact.
+        out["error"] = (f"{url} names several branches ({', '.join(sorted(branches))}); "
+                        "the current stable branch is undetermined")
+        return out
+
+    stable = normalise_branch(branches.pop())
+    if not stable:
+        out["error"] = (f"{url} named {branches or 'an unusable'} as the stable "
+                        "branch, which is not a branch we understand")
+        return out
+
+    versions = set(_STABLE_VERSION_RE.findall(text))
+    out["stable_branch"] = stable
+    # A point release is a nicety, not the answer. If the file somehow carries
+    # several, report none rather than an arbitrary one.
+    out["stable_version"] = next(iter(versions)) if len(versions) == 1 else None
+    out["source"] = url
+    return out
+
+
+def is_branch_eol(branch: Optional[str],
+                  stable_branch: Optional[str]) -> Optional[bool]:
+    """Is `branch` known to be past its end of life? None when undetermined.
+
+    The same tri-state discipline as `is_update_available`, and for the same
+    reason: "could not check" and "still supported" are opposite states.
+
+        True   -> positively known not to be the current stable branch.
+        False  -> it IS the current stable branch.
+        None   -> either side is missing or unusable, so nothing is claimed.
+
+    The comparison is on the normalised MAJOR.MINOR series, so `3.19.9` and
+    `v3.19` are the same branch and a point bump is not mistaken for a branch
+    change.
+
+    BOTH sides are validated before they are compared. A `stable_branch` that
+    is not a branch we understand yields None rather than being compared as
+    unequal: `v3.24 != None` is `True`, so an unvalidated right-hand side
+    would report every image as EOL the moment the field format changed
+    upstream. "Definitely different" and "could not be compared" are different
+    answers, and only the first is `True`.
+    """
+    if not branch or not stable_branch:
+        return None
+    current = normalise_branch(branch)
+    stable = normalise_branch(stable_branch)
+    if not current or not stable:
+        return None
+    return current != stable
+
+
+# ---------------------------------------------------------------------------
 # Disk cache
 # ---------------------------------------------------------------------------
 
@@ -649,6 +909,14 @@ def _cache_is_fresh(entry: dict, now: float) -> bool:
 
     A FAILED entry uses the much shorter ERROR_RETRY_INTERVAL_SECONDS so a
     transient outage is not cached for half a day.
+
+    A PARTIAL failure — the Chromium answer is good but the branch-support
+    lookup failed — is treated the same way, for the same reason. Pinning
+    `branch_eol: None` ("we could not determine whether your base OS is
+    supported") for 12 h would hide exactly the condition this field exists to
+    surface, and doing so on a 3 KB endpoint that is merely flaky is not a
+    defensible trade. The retry is only expensive while that endpoint is
+    actually broken, which is transient by nature.
     """
     try:
         checked_at = float(entry.get("checked_at"))
@@ -656,7 +924,8 @@ def _cache_is_fresh(entry: dict, now: float) -> bool:
         return False
     if not entry.get("result"):
         return False
-    failed = bool(entry.get("result", {}).get("error"))
+    result = entry.get("result") or {}
+    failed = bool(result.get("error")) or bool(result.get("branch_eol_error"))
     ttl = ERROR_RETRY_INTERVAL_SECONDS if failed else VERSION_CHECK_INTERVAL_SECONDS
     return (now - checked_at) < ttl
 
@@ -668,10 +937,17 @@ def _cache_is_fresh(entry: dict, now: float) -> bool:
 def _unknown(image: str, image_id: Optional[str], reason: str,
               alpine: Optional[str] = None, arch: Optional[str] = None,
               current: Optional[str] = None) -> Dict[str, Any]:
+    # `branch_eol` is None here, not False: we never got far enough to ask.
+    # Claiming "supported" for an image we could not even inspect is the exact
+    # lie this field exists to prevent.
     return {
         "current": current,
         "latest": None,
         "update_available": None,
+        "branch_eol": None,
+        "stable_branch": None,
+        "stable_version": None,
+        "branch_eol_error": reason,
         "checked_at": None,
         "source": {"current": "image" if current else None, "latest": None},
         "error": reason,
@@ -759,14 +1035,51 @@ def check_chromium_update(client: Any, image: str = DOCKER_IMAGE_NAME, *,
     if error and installed.get("error") is None:
         _log(error)
 
+    # Branch EOL, computed AFTER the comparison above and entirely separately.
+    #
+    # Nothing below this line can change `current`, `latest` or
+    # `update_available`. The ordering is the guarantee: the Chromium answer is
+    # already final, so a failure here degrades only the new field.
+    #
+    # Its error goes in `branch_eol_error` and NOT in `error`. `error` is the
+    # contract's "the Chromium answer is UNKNOWN" channel, and `detector()`
+    # reads a truthy `error` as "discard `latest`, do not rebuild". Folding a
+    # failed 3 KB side-lookup into it would throw away a perfectly good version
+    # answer and skip a legitimate update — the module's own stated rule is
+    # that the EOL check must never be mandatory for a positive result.
+    stable = fetch_stable_branch(arch, timeout=network_timeout)
+    stable_branch = stable.get("stable_branch")
+    branch_eol = is_branch_eol(branch, stable_branch)
+    branch_eol_error = stable.get("error")
+    if branch_eol_error:
+        _log(f"branch support status undetermined: {branch_eol_error}")
+
+    if branch_eol is True:
+        # Do NOT set update_available. Rebuilding here would install the newest
+        # Chromium this frozen branch will ever publish and leave the image
+        # exactly as unpatched, at 1.31 GB a pop — and silently repinning the
+        # user's base OS is a bigger decision than updating a package inside
+        # it. The fact is reported; the caller decides.
+        eol_note = (f"the image's Alpine branch {branch} is no longer the current "
+                    f"stable one ({stable_branch}); it is end-of-life and frozen, "
+                    "so no further Chromium will be published for it and no "
+                    "security fixes reach it — rebuilding within this branch "
+                    "cannot fix that")
+        note = f"{note}; {eol_note}" if note else eol_note
+
     result = {
         "current": current,
         "latest": latest,
         "update_available": available,
+        "branch_eol": branch_eol,
+        "stable_branch": stable_branch,
+        "stable_version": stable.get("stable_version"),
+        "branch_eol_error": branch_eol_error,
         "checked_at": now,
         "source": {
             "current": installed.get("source") or "image",
             "latest": published.get("source"),
+            "stable": stable.get("source"),
         },
         "error": error,
         "from_cache": False,
@@ -823,6 +1136,8 @@ def detector(image_name: str) -> Dict[str, Any]:
     except Exception as exc:
         _log(f"no Docker client available: {exc}")
         return {"current": None, "latest": None, "update_available": None,
+                "branch_eol": None, "stable_branch": None, "stable_version": None,
+                "branch_eol_error": f"no Docker client: {exc}",
                 "checked_at": None, "source": {}, "error": f"no Docker client: {exc}",
                 "from_cache": False, "image": image_name, "image_id": None,
                 "alpine_version": None, "arch": None, "repo": None, "note": None}
@@ -856,6 +1171,7 @@ def register_detector(target: Any = None) -> bool:
 
 __all__ = [
     "ALPINE_REPOS",
+    "ALPINE_STABLE_RELEASES_URL",
     "CHECK_CACHE_FILE",
     "ERROR_RETRY_INTERVAL_SECONDS",
     "NETWORK_TIMEOUT_SECONDS",
@@ -864,6 +1180,8 @@ __all__ = [
     "check_chromium_update",
     "detector",
     "fetch_latest_version",
+    "fetch_stable_branch",
+    "is_branch_eol",
     "is_update_available",
     "normalise_branch",
     "read_image_versions",

@@ -160,6 +160,21 @@ def make_updater(cli=None, containers=(), detector=None, clock=None, **kwargs):
 UPDATE_DETECTOR = lambda image: {'current': '152.0.7977.82', 'latest': '153.0.2.1'}
 NO_UPDATE_DETECTOR = lambda image: {'current': '152.0.7977.82', 'latest': '152.0.7977.82'}
 
+#: The version `UPDATE_DETECTOR` reports as available.
+LATEST = '153.0.2.1'
+
+
+def consent(updater, version=None, reason='test'):
+    """Grant explicit, versioned consent — i.e. the user clicked "Apply now".
+
+    Since the policy change, a build happens ONLY through this path (or an
+    unattended opt-in). Every test that genuinely wants a rebuild calls this,
+    so "no consent, no build" is visible at every call site rather than being
+    papered over by a fixture-wide default.
+    """
+    return updater.apply_update(version if version is not None else LATEST,
+                                reason=reason)
+
 
 # ═══════════════════════════════════════════ 1. staging → verify → promote
 
@@ -167,7 +182,7 @@ def test_success_builds_to_staging_then_promotes():
     """The happy path must build to a staging tag and only then move :latest."""
     updater, tmp, cli, _ = make_updater(detector=UPDATE_DETECTOR)
     try:
-        result = updater.check_and_start(reason='test')
+        result = consent(updater)
         assert result['started'] is True, result
         assert updater.wait_for_idle(30), 'background update thread did not finish'
 
@@ -218,7 +233,7 @@ def test_failure_leaves_existing_image_untouched():
     updater, tmp, cli, _ = make_updater(cli=FakeDockerCLI(failing=['build']),
                                        detector=UPDATE_DETECTOR)
     try:
-        result = updater.check_and_start(reason='test')
+        result = consent(updater)
         assert result['started'] is True, result
         assert updater.wait_for_idle(30)
 
@@ -251,7 +266,7 @@ def test_verification_failure_does_not_promote():
     cli = FakeDockerCLI(verify_ok=False)
     updater, tmp, cli, _ = make_updater(cli=cli, detector=UPDATE_DETECTOR)
     try:
-        updater.check_and_start(reason='test')
+        consent(updater)
         assert updater.wait_for_idle(30)
 
         status = updater.get_update_status()
@@ -270,7 +285,7 @@ def test_promotion_failure_removes_staging_tag():
     updater, tmp, cli, _ = make_updater(cli=FakeDockerCLI(failing=['tag']),
                                        detector=UPDATE_DETECTOR)
     try:
-        updater.check_and_start(reason='test')
+        consent(updater)
         assert updater.wait_for_idle(30)
 
         status = updater.get_update_status()
@@ -294,7 +309,7 @@ def test_docker_listing_failure_defers_rather_than_building():
     updater, tmp, cli, _ = make_updater(cli=cli, detector=UPDATE_DETECTOR)
     updater._client_factory = lambda: ExplodingClient()
     try:
-        updater.check_and_start(reason='test')
+        consent(updater)
         assert updater.wait_for_idle(30)
         status = updater.get_update_status()
         assert status['state'] == 'deferred', status
@@ -319,7 +334,7 @@ def test_lock_prevents_a_second_build_in_the_same_process():
 
     updater, tmp, cli, _ = make_updater(cli=SlowCLI(), detector=UPDATE_DETECTOR)
     try:
-        first = updater.check_and_start(reason='first')
+        first = consent(updater, reason='first')
         assert first['started'] is True, first
         assert started.wait(10), 'build never began'
 
@@ -347,6 +362,7 @@ def test_lock_is_os_level_and_blocks_a_second_process():
     updater, tmp, cli, _ = make_updater(detector=UPDATE_DETECTOR)
     try:
         # Hold the very same lock file from a different process.
+        # (consent, not check_and_start, so this exercises the real build path)
         holder = subprocess.Popen(
             [sys.executable, '-c',
              'import fcntl,os,sys,time\n'
@@ -371,7 +387,7 @@ def test_lock_is_os_level_and_blocks_a_second_process():
         # Once the other process dies the lock is free again — flock is
         # released on fd close, so there is no stale lock to clean up.
         assert updater.is_locked() is False
-        assert updater.check_and_start(reason='after')['started'] is True
+        assert consent(updater, reason='after')['started'] is True
         assert updater.wait_for_idle(30)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -386,7 +402,7 @@ def test_running_container_defers_the_build():
                     FakeContainer('/chrome-Zoom-1', 'exited')],
         detector=UPDATE_DETECTOR)
     try:
-        result = updater.check_and_start(reason='test')
+        result = consent(updater)
         assert result['started'] is True, result
         assert updater.wait_for_idle(30)
 
@@ -407,7 +423,7 @@ def test_non_profile_containers_do_not_defer():
                     FakeContainer('/chrome-Stopped', 'exited')],
         detector=UPDATE_DETECTOR)
     try:
-        updater.check_and_start(reason='test')
+        consent(updater)
         assert updater.wait_for_idle(30)
         assert updater.get_update_status()['state'] == 'ready', \
             updater.get_update_status()
@@ -423,7 +439,7 @@ def test_status_transitions_and_timestamps():
     try:
         assert updater.get_update_status()['state'] == 'idle'
 
-        updater.check_and_start(reason='test')
+        consent(updater)
         assert updater.wait_for_idle(30)
 
         status = updater.get_update_status()
@@ -447,16 +463,23 @@ def test_up_to_date_does_not_build():
         assert updater.wait_for_idle(30)
         status = updater.get_update_status()
         assert status['state'] == 'up_to_date', status
+        assert status['consent_required'] is False, status
         assert cli.built_tags() == [], 'nothing to update means no build'
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def test_no_detector_fails_closed():
+def test_no_detector_fails_closed_as_unknown_not_up_to_date():
     """With no version detector the updater must NOT rebuild.
 
     'Cannot tell' is not 'yes, rebuild' — otherwise every app start costs
     minutes and 1.31 GB of I/O on a machine that may already be current.
+
+    It is ALSO not 'up to date'. Before the policy change this state was
+    reported as `up_to_date`, which rendered a browser that could not be
+    checked identically to one that is genuinely current — the exact
+    conflation that lets a browser stay stale behind a green UI. The state is
+    now `unknown`.
     """
     updater, tmp, cli, _ = make_updater(detector=None)
     image_update.set_version_detector(None)
@@ -464,13 +487,13 @@ def test_no_detector_fails_closed():
         updater.check_and_start(reason='test')
         assert updater.wait_for_idle(30)
         status = updater.get_update_status()
-        assert status['state'] == 'up_to_date', status
+        assert status['state'] == 'unknown', status
         assert cli.built_tags() == [], 'a missing detector must not trigger a build'
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def test_raising_detector_fails_closed():
+def test_raising_detector_fails_closed_as_unknown():
     def boom(image):
         raise RuntimeError('pkgs.alpinelinux.org unreachable')
 
@@ -478,7 +501,7 @@ def test_raising_detector_fails_closed():
     try:
         updater.check_and_start(reason='test')
         assert updater.wait_for_idle(30)
-        assert updater.get_update_status()['state'] == 'up_to_date', \
+        assert updater.get_update_status()['state'] == 'unknown', \
             updater.get_update_status()
         assert cli.built_tags() == [], 'a raising detector must not trigger a build'
     finally:
@@ -581,7 +604,7 @@ def test_debounce_prevents_a_retry_loop_after_failure():
     cli = FakeDockerCLI(failing=['build'])
     updater, tmp, cli, clock = make_updater(cli=cli, detector=UPDATE_DETECTOR)
     try:
-        updater.check_and_start(reason='first')
+        consent(updater, reason='first')
         assert updater.wait_for_idle(30)
         assert updater.get_update_status()['state'] == 'failed'
         assert len(cli.built_tags()) == 1
@@ -599,7 +622,7 @@ def test_debounce_prevents_a_retry_loop_after_failure():
 
         # Past the cooldown exactly one retry happens.
         clock.advance(86401)
-        assert updater.check_and_start(reason='after-cooldown')['started'] is True
+        assert consent(updater, reason='after-cooldown')['started'] is True
         assert updater.wait_for_idle(30)
         assert len(cli.built_tags()) == 2, cli.built_tags()
     finally:
@@ -609,7 +632,7 @@ def test_debounce_prevents_a_retry_loop_after_failure():
 def test_debounce_applies_after_a_successful_build_too():
     updater, tmp, cli, clock = make_updater(detector=UPDATE_DETECTOR)
     try:
-        updater.check_and_start(reason='first')
+        consent(updater, reason='first')
         assert updater.wait_for_idle(30)
         assert len(cli.built_tags()) == 1
 
@@ -630,7 +653,11 @@ def test_deferral_is_debounced_too():
         containers=[FakeContainer('/chrome-Demo', 'running')],
         detector=UPDATE_DETECTOR)
     try:
-        updater.check_and_start(reason='first')
+        # Consent, not a bare check: a detect-only run stops at
+        # `update_available` and never reaches the container check, which is
+        # the correct new behaviour — a pending update must stay visible while
+        # a profile is open.
+        consent(updater, reason='first')
         assert updater.wait_for_idle(30)
         assert updater.get_update_status()['state'] == 'deferred'
 
@@ -644,7 +671,7 @@ def test_deferral_is_debounced_too():
 def test_force_bypasses_the_routine_debounce():
     updater, tmp, cli, clock = make_updater(detector=UPDATE_DETECTOR)
     try:
-        updater.check_and_start(reason='first')
+        consent(updater, reason='first')
         assert updater.wait_for_idle(30)
         assert len(cli.built_tags()) == 1
         assert updater.check_and_start(force=True, reason='manual')['started'] is True
@@ -695,7 +722,7 @@ def test_check_and_start_returns_before_the_build_finishes():
     updater, tmp, cli, _ = make_updater(cli=VerySlowCLI(), detector=UPDATE_DETECTOR)
     try:
         start = time.monotonic()
-        result = updater.check_and_start(reason='test')
+        result = consent(updater)
         elapsed = time.monotonic() - start
         assert result['started'] is True, result
         assert building.wait(10), 'build never started'
@@ -736,7 +763,7 @@ def test_no_module_writes_to_stdout():
         from io import StringIO
         real_stdout, sys.stdout = sys.stdout, StringIO()
         try:
-            updater.check_and_start(reason='test')
+            consent(updater)
             assert updater.wait_for_idle(30)
             captured = sys.stdout.getvalue()
         finally:
@@ -752,7 +779,7 @@ def test_progress_goes_to_stderr():
         from io import StringIO
         real_stderr, sys.stderr = sys.stderr, StringIO()
         try:
-            updater.check_and_start(reason='test')
+            consent(updater)
             assert updater.wait_for_idle(30)
             captured = sys.stderr.getvalue()
         finally:
@@ -798,7 +825,417 @@ def test_bridge_registers_both_methods():
         'a check must not run at import time'
 
 
-# ═══════════════════════════════ 9. non-vacuity (mutation proof)
+# ═══════════════════════ 9. THE POLICY: detect-and-notify, consent to build
+#
+# These are the tests that encode the user's decision: auto-update must NOT
+# run unattended. A browser silently replacing itself is not an acceptable
+# default, because upgrading Chromium cannot be undone — the browser will not
+# downgrade a profile.
+
+def test_default_startup_detects_and_informs_without_building():
+    """THE DEFAULT: app start checks, records, and builds NOTHING.
+
+    This is the test that would have caught the original design. Before the
+    policy change this exact call rebuilt the image unattended.
+    """
+    updater, tmp, cli, _ = make_updater(detector=UPDATE_DETECTOR)
+    try:
+        assert updater.auto_rebuild_requested() is False, 'must be opt-in'
+        result = updater.check_and_start(reason='app_start')
+        assert result['started'] is True, result
+        assert updater.wait_for_idle(30)
+
+        status = updater.get_update_status()
+        assert status['state'] == 'update_available', status
+        assert status['current_version'] == '152.0.7977.82', status
+        assert status['latest_version'] == LATEST, status
+        assert cli.built_tags() == [], \
+            f'the default must not build without consent: {cli.built_tags()}'
+        assert cli.tagged() == [], ':latest must not move without consent'
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_default_startup_does_not_build_even_with_a_container_listing_failure():
+    """No consent means the build path — including the container check — is
+    never reached at all.
+
+    Worth asserting separately: it proves the refusal is a POLICY decision
+    taken before any mutating work, not an accident of the environment. If the
+    Docker client is unreachable the run still reports the update as pending
+    rather than erroring or, worse, proceeding to build.
+    """
+    class ExplodingClient:
+        @property
+        def containers(self):
+            raise RuntimeError('daemon unreachable')
+
+    updater, tmp, cli, _ = make_updater(detector=UPDATE_DETECTOR)
+    updater._client_factory = lambda: ExplodingClient()
+    try:
+        updater.check_and_start(reason='app_start')
+        assert updater.wait_for_idle(30)
+        status = updater.get_update_status()
+        assert status['state'] == 'update_available', status
+        # Detection legitimately reads versions.env via a throwaway, read-only
+        # `docker run` — that is the whole point of the startup check. What
+        # must not happen is any MUTATING command.
+        assert cli.built_tags() == [], f'no build without consent: {cli.calls}'
+        assert cli.tagged() == [], f':latest must not move: {cli.calls}'
+        assert not cli.removed_refs(), cli.removed_refs()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_explicit_consent_triggers_exactly_one_build():
+    """The user clicks "Apply now" -> exactly one build, then it is promoted."""
+    updater, tmp, cli, _ = make_updater(detector=UPDATE_DETECTOR)
+    try:
+        updater.check_and_start(reason='app_start')
+        assert updater.wait_for_idle(30)
+        assert cli.built_tags() == [], 'precondition: nothing built yet'
+
+        result = updater.apply_update(version=LATEST, reason='user_consent')
+        assert result['started'] is True, result
+        assert result['consent_version'] == LATEST, result
+        assert updater.wait_for_idle(30)
+
+        status = updater.get_update_status()
+        assert status['state'] == 'ready', status
+        assert len(cli.built_tags()) == 1, \
+            f'exactly one build expected, got {cli.built_tags()}'
+        assert cli.tagged() == [(cli.built_tags()[0], 'isolated-chrome:latest')], \
+            cli.tagged()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_consent_applies_to_the_specific_version_not_a_blanket_yes():
+    """Consent for 153 must NOT authorise a rebuild when 154 is available.
+
+    This is the property that makes consent a gate rather than a notification.
+    If the check and the click disagree, nothing is built and the status is
+    refreshed so the user is asked about the version actually on offer.
+    """
+    detector = lambda image: {'current': '152.0.7977.82', 'latest': '154.9.9.9'}
+    updater, tmp, cli, _ = make_updater(detector=detector)
+    try:
+        updater.check_and_start(reason='app_start')
+        assert updater.wait_for_idle(30)
+        assert updater.get_update_status()['state'] == 'update_available'
+
+        # The user approved 153 (what the UI showed). 154 is what is live.
+        result = updater.apply_update(version=LATEST, reason='user_consent')
+        assert result['started'] is True, 'the check still runs'
+        assert updater.wait_for_idle(30)
+
+        status = updater.get_update_status()
+        assert status['state'] == 'update_available', \
+            f'a version mismatch must not build: {status}'
+        assert status['latest_version'] == '154.9.9.9', \
+            'the status must refresh to the version actually available'
+        assert status['consent_version'] == '154.9.9.9', \
+            'the UI must be told to ask about the new version'
+        assert cli.built_tags() == [], 'must not build a version nobody approved'
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_apply_update_without_a_known_available_version_refuses():
+    """Consent requires something to consent TO.
+
+    When availability is unknown there is no version to approve, so this
+    refuses rather than guessing. Crucially it says "no update available",
+    NOT "you are up to date" — the two are different and conflating them is
+    how a browser stays stale behind a green UI.
+    """
+    updater, tmp, cli, _ = make_updater(detector=None)
+    image_update.set_version_detector(None)
+    try:
+        updater.check_and_start(reason='app_start')
+        assert updater.wait_for_idle(30)
+        assert updater.get_update_status()['state'] == 'unknown'
+
+        result = updater.apply_update(version=None)
+        assert result['started'] is False, result
+        assert result['reason'] == 'no_update_available', result
+        assert cli.built_tags() == [], result
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_unattended_opt_in_rebuilds_without_consent():
+    """CHROME_ISOLATION_AUTO_REBUILD=1 restores unattended rebuilds."""
+    updater, tmp, cli, _ = make_updater(detector=UPDATE_DETECTOR)
+    try:
+        os.environ[image_update.ENV_AUTO_REBUILD] = '1'
+        try:
+            assert updater.auto_rebuild_requested() is True
+            # NOTE: plain startup, no apply_update() anywhere.
+            updater.check_and_start(reason='app_start')
+            assert updater.wait_for_idle(30)
+
+            status = updater.get_update_status()
+            assert status['state'] == 'ready', status
+            assert status['policy'] == 'unattended', status
+            assert len(cli.built_tags()) == 1, cli.built_tags()
+        finally:
+            del os.environ[image_update.ENV_AUTO_REBUILD]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_unattended_opt_in_is_off_by_default():
+    """The opt-in must not be accidentally true for any truthy spelling."""
+    updater, tmp, cli, _ = make_updater()
+    try:
+        for value in ('', '0', 'false', 'no', 'off', 'maybe'):
+            os.environ[image_update.ENV_AUTO_REBUILD] = value
+            assert updater.auto_rebuild_requested() is False, value
+        for value in ('1', 'true', 'YES', 'on'):
+            os.environ[image_update.ENV_AUTO_REBUILD] = value
+            assert updater.auto_rebuild_requested() is True, value
+    finally:
+        os.environ.pop(image_update.ENV_AUTO_REBUILD, None)
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_kill_switch_beats_the_unattended_opt_in():
+    """`CHROME_ISOLATION_NO_AUTO_UPDATE` must win over the opt-in.
+
+    A user who has said "do not touch my browser" must not be overridden by a
+    flag that happens to be left set in the environment.
+    """
+    updater, tmp, cli, _ = make_updater(detector=UPDATE_DETECTOR)
+    try:
+        os.environ[image_update.ENV_AUTO_REBUILD] = '1'
+        os.environ[image_update.ENV_DISABLE] = '1'
+        try:
+            assert updater.enabled is False
+            assert updater.auto_rebuild_requested() is True, \
+                'the opt-in is still set; the kill switch must beat it'
+
+            # Startup path.
+            result = updater.check_and_start(reason='app_start')
+            assert result['started'] is False, result
+            assert result['reason'] == 'disabled', result
+            assert result['status']['policy'] == 'disabled', result
+
+            # Consent path — a user clicking "Apply now" must also be refused.
+            applied = updater.apply_update(version=LATEST)
+            assert applied['started'] is False, applied
+            assert applied['reason'] == 'disabled', applied
+
+            assert cli.calls == [], \
+                f'the kill switch must run no docker command: {cli.calls}'
+        finally:
+            os.environ.pop(image_update.ENV_DISABLE, None)
+            os.environ.pop(image_update.ENV_AUTO_REBUILD, None)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_status_states_are_distinct_and_queryable():
+    """Every state the UI must render differently is reachable and distinct.
+
+    The point of the requirement is that a user can SEE that an update is
+    pending, and can tell "no update" from "could not determine". If two of
+    these collapsed into one state, that guarantee is gone.
+    """
+    seen = {}
+
+    def run(name, detector=None, **kwargs):
+        updater, tmp, cli, _ = make_updater(detector=detector, **kwargs)
+        try:
+            if detector is not None:
+                updater.check_and_start(reason='app_start')
+                assert updater.wait_for_idle(30), name
+            seen[name] = updater.get_update_status()['state']
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    run('idle')                          # nothing has happened yet
+    run('up_to_date', detector=NO_UPDATE_DETECTOR)
+    run('update_available', detector=UPDATE_DETECTOR)
+
+    # `unknown` is reachable and is NOT `up_to_date`.
+    updater, tmp, cli, _ = make_updater(detector=None)
+    try:
+        image_update.set_version_detector(None)
+        updater.check_and_start(reason='app_start')
+        assert updater.wait_for_idle(30)
+        seen['unknown'] = updater.get_update_status()['state']
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    # building/verifying/ready/failed are reachable via a consented build.
+    for name, cli_kw in (('ready', {}), ('failed', {'failing': ['build']})):
+        updater, tmp, cli, _ = make_updater(cli=FakeDockerCLI(**cli_kw),
+                                           detector=UPDATE_DETECTOR)
+        try:
+            consent(updater)
+            assert updater.wait_for_idle(30)
+            seen[name] = updater.get_update_status()['state']
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    # disabled is reachable via the kill switch.
+    updater, tmp, cli, _ = make_updater(detector=UPDATE_DETECTOR)
+    try:
+        os.environ[image_update.ENV_DISABLE] = '1'
+        try:
+            updater.check_and_start(reason='app_start')
+            seen['disabled'] = updater.get_update_status()['state']
+        finally:
+            del os.environ[image_update.ENV_DISABLE]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    assert seen['idle'] == 'idle'
+    assert seen['up_to_date'] == 'up_to_date'
+    assert seen['unknown'] == 'unknown', seen
+    assert seen['update_available'] == 'update_available', seen
+    assert seen['ready'] == 'ready', seen
+    assert seen['failed'] == 'failed', seen
+    assert seen['disabled'] == 'disabled', seen
+
+    # The two that must never be conflated.
+    assert seen['unknown'] != seen['up_to_date'], \
+        '"could not determine" must not be reported as "up to date"'
+    # And every one of them must be in the declared vocabulary, so the UI can
+    # switch on it.
+    for name, state in seen.items():
+        assert state in image_update.STATES, f'{name}: {state!r} not in STATES'
+
+
+def test_status_carries_the_full_renderer_contract():
+    """Every field the renderer needs is present on a fresh, empty state.
+
+    Guarding against `undefined` in the renderer is its job, not the
+    backend's: a UI that has to handle a missing key will eventually render
+    the missing key.
+    """
+    updater, tmp, cli, _ = make_updater(detector=UPDATE_DETECTOR)
+    try:
+        for status in (updater.get_update_status(),):
+            for key in ('state', 'update_available', 'current_version',
+                        'latest_version', 'consent_required', 'consent_version',
+                        'consent_warning', 'consent_warning_short', 'policy',
+                        'enabled', 'auto_rebuild', 'forced', 'error',
+                        'last_result', 'staging_tag', 'started_at',
+                        'finished_at', 'next_attempt_at', 'retry_in_seconds'):
+                assert key in status, f'missing contract key {key}: {status}'
+
+        # Once an update is pending, the consent fields are populated.
+        updater.check_and_start(reason='app_start')
+        assert updater.wait_for_idle(30)
+        status = updater.get_update_status()
+        assert status['consent_required'] is True, status
+        assert status['consent_version'] == LATEST, status
+        # The warning must name the one-way door, not just exist.
+        assert 'downgrade' in status['consent_warning'].lower(), status
+        assert 'cannot be undone' in status['consent_warning_short'].lower(), status
+        # ...and the current version is substituted into it, so the text the
+        # user reads is about THEIR version and not a template.
+        assert '152.0.7977.82' in status['consent_warning'], status
+        assert '{current}' not in status['consent_warning'], \
+            'the consent template placeholder leaked into the UI text'
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_no_consent_fields_leak_when_no_update_is_pending():
+    """consent_version must be None outside the pending state.
+
+    Otherwise a stale consent_version left in the state file could be passed
+    straight back to apply_update() by a renderer that caches it.
+    """
+    updater, tmp, cli, _ = make_updater(detector=NO_UPDATE_DETECTOR)
+    try:
+        updater.check_and_start(reason='app_start')
+        assert updater.wait_for_idle(30)
+        status = updater.get_update_status()
+        assert status['consent_required'] is False, status
+        assert status['consent_version'] is None, status
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_pending_update_is_visible_even_while_a_profile_container_runs():
+    """The deferral protects the BUILD, not the user's ability to SEE.
+
+    Previously the container check ran first and hid everything. Now detection
+    runs first, so an update pending while the user has a profile open is
+    still reported — which is precisely the update they would otherwise never
+    see.
+    """
+    updater, tmp, cli, _ = make_updater(
+        cli=FakeDockerCLI(),
+        containers=[FakeContainer('/chrome-Demo', 'running')],
+        detector=UPDATE_DETECTOR)
+    try:
+        updater.check_and_start(reason='app_start')
+        assert updater.wait_for_idle(30)
+
+        status = updater.get_update_status()
+        assert status['state'] == 'update_available', \
+            f'a pending update must stay visible: {status}'
+        assert status['latest_version'] == LATEST, status
+        assert cli.built_tags() == [], 'no consent, no build'
+
+        # And with consent it defers rather than building mid-launch.
+        consent(updater)
+        assert updater.wait_for_idle(30)
+        assert updater.get_update_status()['state'] == 'deferred', \
+            updater.get_update_status()
+        assert cli.built_tags() == [], 'must not build while a profile runs'
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_consent_does_not_bypass_the_failure_cooldown():
+    """Consent may bypass the routine debounce, never the failure cooldown.
+
+    A "Apply now" button that ignores the cooldown turns one failed build
+    into minutes of cold-build I/O on every click.
+    """
+    updater, tmp, cli, clock = make_updater(cli=FakeDockerCLI(failing=['build']),
+                                            detector=UPDATE_DETECTOR)
+    try:
+        consent(updater, reason='first')
+        assert updater.wait_for_idle(30)
+        assert updater.get_update_status()['state'] == 'failed'
+        assert len(cli.built_tags()) == 1
+
+        for i in range(5):
+            result = updater.apply_update(version=LATEST)
+            assert result['started'] is False, f'click {i} started a build: {result}'
+            assert result['reason'] == 'debounced', result
+        assert len(cli.built_tags()) == 1, cli.built_tags()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_bridge_does_not_expose_an_unattended_force_to_the_renderer():
+    """The renderer must reach a rebuild only through the consent gate.
+
+    `image_update_check` deliberately has no `force` parameter: if it did, a
+    renderer bug (or a compromised renderer) could rebuild the browser with
+    no human in the loop, which is the whole thing this policy prevents.
+    """
+    with open(os.path.join(ROOT, 'backend', 'bridge.py')) as fh:
+        source = fh.read()
+    assert '"image_update_apply"' in source, 'bridge is missing the consent method'
+    check_line = [ln for ln in source.splitlines() if '"image_update_check"' in ln]
+    assert check_line, 'bridge is missing image_update_check'
+    assert 'force' not in check_line[0], \
+        f'image_update_check must not accept force: {check_line[0]}'
+    # And importing the bridge must not start anything.
+    assert 'check_and_start' not in source.split('_METHODS')[0], \
+        'a check must not run at import time'
+
+
+# ═══════════════════════════════ 10. non-vacuity (mutation proof)
 
 #: Rewrites the staging tag so the build targets :latest directly — the exact
 #: naive implementation this module exists to replace. There is no staging tag
@@ -841,6 +1278,39 @@ _MUTATION_IGNORE_RUNNING = (
 _MUTATION_NO_DEBOUNCE = (
     ('        if elapsed < floor:',
      '        if False:  # MUTANT: debounce disabled'),
+)
+
+# ── Mutations of the POLICY itself ──────────────────────────────────────────
+# The four below remove one specific safety property of the new
+# detect-and-notify default. Each is a realistic "simplification" someone
+# would make later, and each must turn the suite red.
+
+#: Removes the consent requirement entirely — the exact behaviour this change
+#: exists to undo, i.e. "the browser quietly replaces itself on app start".
+_MUTATION_AUTO_BUILD_WITHOUT_CONSENT = (
+    ('            authorised = bool(consent) or unattended or bool(force)',
+     '            authorised = True  # MUTANT: no consent required'),
+)
+
+#: Makes consent a blanket "yes to updates" instead of a versioned token —
+#: the user approves 153 and silently receives 154.
+_MUTATION_CONSENT_IGNORES_VERSION = (
+    ("""            if consent is not None and latest is not None and consent != latest:""",
+     """            if False:  # MUTANT: consent no longer version-scoped"""),
+)
+
+#: Reports "could not determine" as "up to date" — the conflation that lets a
+#: browser stay stale behind a green UI.
+_MUTATION_UNKNOWN_AS_UP_TO_DATE = (
+    ('                    state="unknown", finished_at=self._now(),',
+     '                    state="up_to_date", finished_at=self._now(),'),
+)
+
+#: Lets the unattended opt-in override the kill switch, so a flag left set in
+#: the environment silently re-enables unattended rebuilds.
+_MUTATION_KILL_SWITCH_NOT_WINNING = (
+    ('    def enabled(self) -> bool:',
+     '    def enabled(self) -> bool:\n        return True  # MUTANT'),
 )
 
 
@@ -952,6 +1422,88 @@ def test_safety_tests_go_red_for_the_other_unsafe_designs():
                 + result.stdout[-2000:])
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
+
+
+def test_policy_tests_go_red_when_consent_is_not_required():
+    """Non-vacuity for the CENTRAL claim: the default must not auto-build.
+
+    Rewrites the authorisation check to `True` — the exact pre-change
+    behaviour, where app start silently replaced the user's browser — and
+    requires the policy tests to fail. If they still passed, "no build without
+    consent" would be an assertion nobody had actually proven.
+    """
+    scratch = _scratch_backend(_MUTATION_AUTO_BUILD_WITHOUT_CONSENT)
+    try:
+        for test_name in ('default_startup_detects_and_informs_without_building',
+                          'default_startup_does_not_build_even_with_a_container_listing_failure'):
+            result = _run_test_against(scratch, test_name)
+            assert result.returncode != 0, (
+                f'VACUOUS: {test_name} still passed when consent was removed '
+                f'from the authorisation check.\n' + result.stdout[-2000:])
+            assert test_name in result.stdout, result.stdout[-2000:]
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+def test_policy_tests_go_red_when_consent_stops_being_version_scoped():
+    """Consent must be tied to a version, not be a blanket "yes to updates"."""
+    scratch = _scratch_backend(_MUTATION_CONSENT_IGNORES_VERSION)
+    try:
+        result = _run_test_against(
+            scratch, 'consent_applies_to_the_specific_version_not_a_blanket_yes')
+        assert result.returncode != 0, (
+            'VACUOUS: consent still passed when it stopped being version-scoped '
+            '— a user could approve 153 and silently receive 154.\n'
+            + result.stdout[-2000:])
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+def test_policy_tests_go_red_when_unknown_collapses_into_up_to_date():
+    """'Could not determine' must never be rendered as 'up to date'."""
+    scratch = _scratch_backend(_MUTATION_UNKNOWN_AS_UP_TO_DATE)
+    try:
+        result = _run_test_against(scratch, 'no_detector_fails_closed_as_unknown_not_up_to_date')
+        assert result.returncode != 0, (
+            'VACUOUS: "unknown" still passed when it was reported as '
+            '"up_to_date" — the stale-browser-behind-a-green-UI bug.\n'
+            + result.stdout[-2000:])
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+def test_policy_tests_go_red_when_the_kill_switch_stops_winning():
+    """CHROME_ISOLATION_NO_AUTO_UPDATE must beat the unattended opt-in."""
+    scratch = _scratch_backend(_MUTATION_KILL_SWITCH_NOT_WINNING)
+    try:
+        result = _run_test_against(scratch, 'kill_switch_beats_the_unattended_opt_in')
+        assert result.returncode != 0, (
+            'VACUOUS: the kill switch still lost to the unattended opt-in.\n'
+            + result.stdout[-2000:])
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+def test_suite_is_green_against_the_unmutated_module_for_policy_tests():
+    """Control for all four policy mutations above.
+
+    Without this, a scratch harness that errors on every run would make each
+    of those mutation tests 'pass' for entirely the wrong reason.
+    """
+    scratch = _scratch_backend()
+    try:
+        for test_name in ('default_startup_detects_and_informs_without_building',
+                          'consent_applies_to_the_specific_version_not_a_blanket_yes',
+                          'unattended_opt_in_rebuilds_without_consent',
+                          'kill_switch_beats_the_unattended_opt_in',
+                          'status_states_are_distinct_and_queryable'):
+            result = _run_test_against(scratch, test_name)
+            assert result.returncode == 0, (
+                f'control run failed for {test_name} — the policy mutation '
+                f'tests prove nothing:\n'
+                + result.stdout[-3000:] + result.stderr[-2000:])
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
 
 
 # ───────────────────────────────────────────────────────── standalone runner

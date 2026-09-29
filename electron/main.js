@@ -328,16 +328,20 @@ const startBridge = () => bridgeQueue.startBridge();
 const callBackend = (method, params) => bridgeQueue.callBackend(method, params);
 
 // ─────────────────────────────────────────────
-// Chromium auto-update kick-off
+// Chromium update check kick-off
 //
 // Deliberately placed AFTER the window exists and NOT awaited. The bridge
-// method returns as soon as the rebuild is handed to a background thread, so
-// startup cannot be delayed by it — but firing it before the window would
-// still be wrong, because a slow bridge spawn would then delay first paint
-// for no user-visible benefit. A build is minutes of work that nobody is
-// waiting on; the UI can observe it through `image:updateStatus` whenever it
-// likes. The debounce floor and the single-flight lock mean repeated launches
-// cost one lock attempt each, not one build each.
+// method returns as soon as the version check is handed to a background
+// thread, so startup cannot be delayed by it — but firing it before the
+// window would still be wrong, because a slow bridge spawn would then delay
+// first paint for no user-visible benefit.
+//
+// THIS DETECTS. IT DOES NOT BUILD. Under the default policy the browser is
+// never rebuilt without the user clicking "Apply now" (see `image:applyUpdate`),
+// because upgrading Chromium cannot be undone: the browser will not downgrade
+// a profile. The result — including `update_available` — is polled by the UI
+// through `image:updateStatus`. The debounce floor and the single-flight lock
+// mean repeated launches cost one lock attempt each, not one build each.
 function kickOffImageUpdateCheck() {
   setTimeout(() => {
     callBackend('image_update_check', {}).catch((err) => {
@@ -429,9 +433,45 @@ function registerIpc() {
   // worst case is a fast refusal (kill switch set, a build already running, or
   // the debounce floor not yet elapsed). It is also fired detached, so a
   // bridge that is not up yet just queues harmlessly behind the normal queue.
+  // Chromium update. `image:checkUpdate` DETECTS ONLY — it records what it
+  // found (including `update_available`) and builds nothing. There is
+  // deliberately no `force` parameter on this channel: a rebuild must go
+  // through `image:applyUpdate`, which carries versioned consent.
   ipcMain.handle('image:checkUpdate', () => callBackend('image_update_check', {}));
 
+  // THE CONSENT GATE. The user clicked "Apply now" after being shown the
+  // one-way-door warning. `version` MUST be the value the status reports as
+  // `consent_version`; the backend refuses to build a different version, and
+  // instead refreshes the status so the UI can ask again.
+  //
+  // The warning text itself is NOT generated here. It comes back from the
+  // backend on every status poll (`consent_warning` / `consent_warning_short`)
+  // so the wording travels with the consent and cannot drift.
+  ipcMain.handle('image:applyUpdate', (_, version) =>
+    callBackend('image_update_apply', { version })
+  );
+
   // Status poll for the UI. Reads a small in-memory dict; never blocks.
+  //
+  // RENDERER CONTRACT — `image:updateStatus` resolves to:
+  //   state              one of STATES (see backend/image_update.py)
+  //   update_available   true | false | null   (null = COULD NOT DETERMINE)
+  //   current_version    string | null
+  //   latest_version     string | null
+  //   consent_required   boolean — true only when state === 'update_available'
+  //   consent_version    string | null — pass this to image:applyUpdate
+  //   consent_warning    string — long one-way-door text
+  //   consent_warning_short string — one-line form for a button label
+  //   policy             'disabled' | 'unattended' | 'notify_only'
+  //   enabled            boolean
+  //   auto_rebuild       boolean
+  //   forced             boolean
+  //   error              string | null
+  //   last_result        string
+  //   staging_tag        string | null
+  //   started_at / finished_at   unix ts | null
+  //   next_attempt_at    unix ts | null
+  //   retry_in_seconds   number | null
   ipcMain.handle('image:updateStatus', () => callBackend('image_update_status', {}));
 
   // Export — open native save dialog, then call backend
