@@ -30,6 +30,7 @@ from docker.types import Ulimit
 
 from config import DOCKER_IMAGE_NAME, CONTAINER_PREFIX, APP_DATA_DIR
 from validator import validate_profile_name
+from desktop_manager import wm_class
 from registry import resolve_profile_path, register_profile, get_profile
 from host_share import ensure_host_share_dir, resolve_host_mount
 from proxy_store import resolve as _resolve_proxy
@@ -181,7 +182,12 @@ class DockerManager:
         if proxy:
             # Saved proxy names resolve to their URL from the global store
             proxy = _resolve_proxy(proxy)
-        command = [f'--class=chrome-{profile_name}']
+        # Window class must equal the `StartupWMClass` in the profile's
+        # .desktop entry, or the WM cannot associate the window with its
+        # launcher and shows a wrong/generic icon. desktop_manager.wm_class()
+        # is the single source of truth for both sides. The `chrome-isolation-`
+        # namespace also keeps it clear of real Chrome's `google-chrome` class.
+        command = [f'--class={wm_class(profile_name)}']
         extra_hosts = None
         if proxy:
             parsed = self._parse_proxy(proxy)

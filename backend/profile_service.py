@@ -5,9 +5,11 @@ All inputs go through validator.py before any filesystem or Docker call.
 import json
 import os
 import shutil
+import sys
 import zoneinfo
 
-from config import CHROME_PROFILES_DIR
+import paths
+from config import CHROME_PROFILES_DIR, CHROME_PROFILES_DIR_LEGACY
 from validator import validate_profile_name, safe_profile_path
 from host_share import validate_host_mount, host_share_dir, describe_default
 from registry import (
@@ -17,11 +19,25 @@ from registry import (
 from docker_manager import DockerManager
 from desktop_manager import (
     create_desktop_entry, remove_desktop_entry, desktop_entry_exists,
+    refresh_desktop_entries as _refresh_desktop_entries,
 )
 from archive import import_profile as _import_archive, export_profile as _export_archive
 from proxy_store import validate_url as _validate_proxy_url, _load as _load_proxies
 
 _docker = DockerManager()
+
+# Orphan-profile names already reported to stderr, so a long-running bridge
+# polling get_all_profiles() does not repeat the same warning forever.
+_WARNED_ORPHANS = set()
+
+
+def active_profiles_dir() -> str:
+    """
+    The profile store in use, resolved from THIS module's globals so a caller
+    (or test) that rebinds profile_service.CHROME_PROFILES_DIR gets consistent
+    behaviour.
+    """
+    return paths.resolve_profiles_dir(CHROME_PROFILES_DIR, CHROME_PROFILES_DIR_LEGACY)
 
 
 def _validate_proxy(proxy: str) -> str:
@@ -50,17 +66,45 @@ def _read_machine(path: str) -> dict:
     return machine
 
 
+def _warn_orphans(active_dir: str) -> None:
+    """
+    Tell the user, once per name, that profiles exist in the profile store this
+    install is NOT using (i.e. an un-migrated ~/Chrome, or leftovers after a
+    migration). Those profiles are never used, moved or deleted automatically —
+    the fix is scripts/migrate_profiles_dir.py, which is dry-run by default.
+    Printed to stderr, which the bridge already owns (stdout is the JSON
+    protocol). Reported once per process so a polling UI cannot spam.
+    """
+    other = paths.other_profiles_dir(active_dir, CHROME_PROFILES_DIR,
+                                    CHROME_PROFILES_DIR_LEGACY)
+    for name in sorted(paths.orphan_profiles(active_dir, CHROME_PROFILES_DIR,
+                                             CHROME_PROFILES_DIR_LEGACY)):
+        if name in _WARNED_ORPHANS:
+            continue
+        _WARNED_ORPHANS.add(name)
+        print(
+            f"[chrome-isolation] profile '{name}' exists in {other} "
+            f"but this install is using {active_dir}, so it is not "
+            f"shown. Run scripts/migrate_profiles_dir.py to relocate it.",
+            file=sys.stderr,
+        )
+
+
 def get_all_profiles() -> list:
     """
     Merge registry entries with live Docker status and on-disk size.
     Also picks up any on-disk profiles not yet in the registry.
     """
-    # Ensure on-disk profiles that exist but aren't in registry are included
+    # Ensure on-disk profiles that exist but aren't in registry are included.
+    # Scans the *resolved* store, so a not-yet-migrated install still sees its
+    # profiles in ~/Chrome.
     from registry import _load
     data = _load()
-    if os.path.isdir(CHROME_PROFILES_DIR):
-        for name in os.listdir(CHROME_PROFILES_DIR):
-            path = os.path.join(CHROME_PROFILES_DIR, name)
+    active_dir = active_profiles_dir()
+    _warn_orphans(active_dir)
+    if os.path.isdir(active_dir):
+        for name in os.listdir(active_dir):
+            path = os.path.join(active_dir, name)
             if os.path.isdir(path) and name not in data:
                 try:
                     validate_profile_name(name)
@@ -97,13 +141,27 @@ def get_all_profiles() -> list:
     return profiles
 
 
+def refresh_desktop_entries() -> dict:
+    """
+    Re-derive every desktop entry this app owns. Cheap and idempotent: files
+    whose content is already correct are not touched, so this is safe to call
+    on every app start. Exists because entries used to be created only at
+    profile-creation time, so anything written by an older build (e.g. an
+    entry that fell back to Icon=google-chrome) stayed wrong on disk forever.
+    """
+    return _refresh_desktop_entries()
+
+
 def create_profile(name: str, custom_path: str = '', host_mount: str = '', proxy: str = '') -> dict:
     name = validate_profile_name(name)
 
     if custom_path:
         path = os.path.realpath(os.path.expanduser(custom_path))
     else:
-        path = safe_profile_path(name, CHROME_PROFILES_DIR)
+        # active_profiles_dir(), not the constant: a not-yet-migrated install
+        # must keep putting new profiles next to its existing ones rather than
+        # half-populating the new store.
+        path = safe_profile_path(name, active_profiles_dir())
 
     if os.path.exists(path):
         raise ValueError(f"Directory already exists: {path}")

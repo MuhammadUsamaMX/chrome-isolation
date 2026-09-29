@@ -7,7 +7,8 @@
 #   2. App data: registry, proxy store, machine signatures (~/.local/share/
 #      chrome-isolation-manager)
 #   3. Launcher, .desktop entry, icon
-#   4. Profile data (~/Chrome) — made a backup first!
+#   4. Profile data (~/Isolated-Chrome/profiles, plus the legacy ~/Chrome if
+#      that still holds data) — back it up first!
 #   5. .deb / .rpm package if installed via a package
 #
 # Usage: bash uninstall.sh
@@ -16,7 +17,29 @@ set -euo pipefail
 
 HOME_DIR="$HOME"
 APP_DATA="$HOME_DIR/.local/share/chrome-isolation-manager"
-PROFILES_DIR="$HOME_DIR/Chrome"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# Profile data location: ask the app's config so this follows the constant
+# (and $CHROME_ISOLATION_HOME) instead of hardcoding a path. Falls back to the
+# documented default if Python or the backend is unavailable.
+PROFILES_DIR=""
+for cand in python3 python; do
+  if command -v "$cand" >/dev/null 2>&1; then
+    PROFILES_DIR="$(cd "$SCRIPT_DIR" && "$cand" -c '
+import os, sys
+sys.path.insert(0, os.path.join(os.getcwd(), "backend"))
+import config
+print(config.CHROME_PROFILES_DIR)
+' 2>/dev/null)"
+    [[ -n "$PROFILES_DIR" ]] && break
+  fi
+done
+if [[ -z "$PROFILES_DIR" ]]; then
+  PROFILES_DIR="${CHROME_ISOLATION_HOME:-$HOME_DIR/Isolated-Chrome}/profiles"
+  echo "note: could not read config.py; assuming PROFILES_DIR=$PROFILES_DIR" >&2
+fi
+# Legacy location, for installs created before the relocation and never
+# migrated. Removed only if it actually holds profile data.
+LEGACY_PROFILES_DIR="$HOME_DIR/Chrome"
 LAUNCHER="$HOME_DIR/.local/bin/chrome-isolation"
 DESKTOP="$HOME_DIR/.local/share/applications/chrome-isolation.desktop"
 ICON="$HOME_DIR/.local/share/icons/hicolor/256x256/apps/chrome-isolation.png"
@@ -44,10 +67,14 @@ rm -f "$LAUNCHER"
 rm -f "$DESKTOP"
 rm -f "$ICON"
 
-if [[ -d "$PROFILES_DIR" ]]; then
-  echo "→ Removing profile data (~/Chrome)..."
-  rm -rf "$PROFILES_DIR"
-fi
+for dir in "$PROFILES_DIR" "$LEGACY_PROFILES_DIR"; do
+  # Guard against a mis-resolved empty/root path turning this into `rm -rf /`.
+  if [[ -z "$dir" || "$dir" == "/" || ! -d "$dir" ]]; then
+    continue
+  fi
+  echo "→ Removing profile data ($dir)..."
+  rm -rf "$dir"
+done
 
 if command -v dpkg >/dev/null 2>&1 && dpkg -s chrome-isolation >/dev/null 2>&1; then
   echo "→ Removing .deb package..."

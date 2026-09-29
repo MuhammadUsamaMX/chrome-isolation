@@ -319,7 +319,13 @@ def test_start_container_command():
         cmd = kwargs['command']
         assert not any('--enable-features' in c for c in cmd), \
             f"command must not contain --enable-features: {cmd}"
-        assert '--class=chrome-alice' in cmd, cmd
+        # The window class must be namespaced and must equal the
+        # StartupWMClass in the profile's .desktop entry, so the WM can
+        # associate the window with its launcher. It must NOT be
+        # `chrome-alice` (never matched the entry) and must never be
+        # `google-chrome` (that is real Chrome's class).
+        assert '--class=chrome-isolation-alice' in cmd, cmd
+        assert '--class=google-chrome' not in cmd, cmd
         # GPU backend flags moved to stealth-launch.sh (per-profile choice)
         assert not any('--use-gl' in c for c in cmd), cmd
         assert not any('--use-angle' in c for c in cmd), cmd
