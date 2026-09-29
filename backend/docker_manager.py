@@ -7,7 +7,10 @@ Docker manager — hardened container runtime (S5 fix).
   Chromium legitimately writes to
 - X11 socket mounted only when needed
 - PulseAudio / PipeWire socket mounted
-- GPU access via /dev/dri (read-only for display, rw for render)
+- GPU access via /dev/dri — see GPU_DEVICE_SPEC below for the exact, honest
+  description of what is and is not granted (the previous claim of
+  "read-only for display, rw for render" was never true: it is rw over the
+  whole tree, and it used to be rwm by docker-py default)
 - Host desktop preferences injected as read-only volumes + env vars
 - --no-sandbox used inside the container (Docker's default seccomp profile blocks unprivileged user namespaces; the container itself is the security boundary)
 - profile registry used for all path lookups
@@ -39,6 +42,55 @@ from image_update import dockerfile_dir as _dockerfile_dir
 # Stable hostname pools — deterministic per profile via MD5
 _H_FIRST  = ['john','alex','sam','mike','lisa','chris','pat','lee','tom','jay','kai','max']
 _H_DEVICE = ['laptop','desktop','pc','thinkpad','studio','home','book','box']
+
+# ---------------------------------------------------------------------------
+# GPU device mapping (L2)
+# ---------------------------------------------------------------------------
+# WHAT IS ACTUALLY GRANTED, stated precisely:
+#
+#   Host path        : /dev/dri
+#   Container path   : /dev/dri   (same path, whole tree: card* and renderD*)
+#   CgroupPermissions: 'rw'  (read + write, NO mknod)
+#
+# The old code passed the bare path '/dev/dri'. docker-py parses a bare string
+# with docker.utils.utils.parse_devices(), which fills in
+# CgroupPermissions='rwm' when no explicit permission field is given — so the
+# container was granted mknod on the host GPU *control* nodes, not just on the
+# render node, and the module docstring's "read-only for display" was simply
+# false. See the docstring above.
+#
+# WHY 'rw' AND NOT 'r' (i.e. why read-only was NOT an option here):
+#   The GPU stack opens the render node O_RDWR, not O_RDONLY. libdrm's
+#   drmOpen() uses O_RDWR, and Mesa/GBM's drmPrimeHandleToFD() — the path that
+#   hands buffers to Chromium's Viz/GL process — requires a *writable* fd on
+#   the render node. The primary node (card*) is likewise opened O_RDWR by
+#   libdrm/DRM-KMS. Mounting /dev/dri 'r' therefore does not "harden" the GPU,
+#   it silently degrades it: Mesa falls back to llvmpipe/swiftshader, the
+#   container shows up in chrome://gpu as a software renderer, and that is
+#   both a fingerprint tell and a performance regression. T2 verified GPU
+#   acceleration works with cap_drop=ALL; 'rw' preserves that exactly, because
+#   for every operation Mesa actually performs, 'rw' and 'rwm' are
+#   indistinguishable.
+#
+# WHAT 'rw' GIVES UP: only the 'm' (mknod) bit, on this device major, for this
+# process. Nothing in Mesa, the DRM ioctl surface, or Chromium ever calls
+# mknod(2) on /dev/dri — render nodes are pre-created by the host's udev.
+# This is defence in depth rather than a closed hole: cap_drop=ALL already
+# denies the process CAP_MKNOD, so the syscall was going to fail regardless.
+# Narrowing the cgroup rule anyway means the boundary does not silently
+# re-widen if the capability drop is ever relaxed, and it removes a knob that
+# nobody turned on purpose.
+#
+# FOOTGUN WARNING — the three-field form is mandatory:
+#   docker-py's device string is  host_path : container_path : permissions.
+#   '/dev/dri:rw' does NOT mean "rw". It parses as host_path='/dev/dri',
+#   container_path='rw', permissions defaulted to 'rwm' — i.e. it would create
+#   a device node at the literal path /rw and restrict nothing. The
+#   permissions field is only honoured as the THIRD field, so the container
+#   path must be spelled out. tests/test_docker_manager.py parses this string
+#   with docker-py's own parse_devices() and asserts the resulting
+#   CgroupPermissions, so this cannot regress silently.
+GPU_DEVICE_SPEC = '/dev/dri:/dev/dri:rw'
 
 
 class DockerManager:
@@ -222,6 +274,35 @@ class DockerManager:
         run_kwargs = dict(
             image=DOCKER_IMAGE_NAME,
             name=cname,
+            # ---- explicit non-root boundary (H2) --------------------------
+            # Pinned HERE, at the call site, and not left to the image's
+            # `USER chrome` build-time directive. Reasoning for the literal
+            # 1000:1000 rather than the host's uid/gid:
+            #
+            #   * The image's chrome user is created by `adduser -u ${USER_ID}`
+            #     and that ARG is ONLY populated by install.sh/setup.sh. The
+            #     rebuild paths that this module can trigger — DockerManager.
+            #     _build_image() and image_update.ImageUpdater._build() — call
+            #     `docker build` with NO --build-arg, so both fall back to the
+            #     Dockerfile default USER_ID=1000. On a host whose uid is not
+            #     1000 those rebuild paths produce a *different* uid than the
+            #     install-time build, so a host-derived value could disagree
+            #     with the image it is about to be run against.
+            #   * Passing a uid with no /etc/passwd entry would leave HOME
+            #     unset inside the container and break $XDG_* defaults, and
+            #   * it would disagree with the tmpfs below, which is created
+            #     uid=1000,gid=1000, and with the profile/Downloads bind mounts
+            #     only if the host uid happens to match.
+            #
+            #   1000:1000 is the value the image is built with, it is what the
+            #   _TMPFS options below assume, and it is what `USER chrome`
+            #   resolves to today — so this is a no-op on the happy path and a
+            #   hard stop on the failure path. A rebuilt or swapped image can
+            #   no longer quietly move the browser to root: the runtime
+            #   posture is decided here, and any image whose chrome uid is not
+            #   1000 fails to write the cache tmpfs instead of silently
+            #   running privileged.
+            user='1000:1000',
             # Realistic host identity — hides Docker-generated hex hostname
             hostname=hostname,
             # 2 GB shared memory (Docker default 64 MB is a VM/container tell)
@@ -264,9 +345,14 @@ class DockerManager:
         )
         if extra_hosts:
             run_kwargs['extra_hosts'] = extra_hosts
-        # GPU access only when the host actually exposes /dev/dri
+        # GPU access only when the host actually exposes /dev/dri. The spec is
+        # the explicit three-field form 'host:container:rw' — see
+        # GPU_DEVICE_SPEC above for why read-only is not an option and why the
+        # 'm' bit is deliberately dropped. It is applied only when /dev/dri
+        # exists on the host, so a GPU-less host still gets no device mapping
+        # at all.
         if os.path.exists('/dev/dri'):
-            run_kwargs['devices'] = ['/dev/dri']
+            run_kwargs['devices'] = [GPU_DEVICE_SPEC]
         # 'audio' group only if it exists on the host
         try:
             grp.getgrnam('audio')
