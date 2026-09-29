@@ -490,6 +490,397 @@ document.querySelectorAll('.nav-item[data-filter]').forEach(btn => {
   });
 });
 
+// ═══════════════════════════════════════════════════════════════════
+// Chromium update — status surface
+//
+// THE RULE THIS WHOLE BLOCK EXISTS TO KEEP: `update_available: null`
+// and `update_available: false` are DIFFERENT FACTS. false means the
+// check ran and the installed version IS current. null means the check
+// could not determine — no detector, the network was down, the package
+// index was unreadable. Rendering null as "You're up to date" is how a
+// browser stays two years stale behind a green indicator, so the two
+// get different TONES ('ok' vs 'warn'), different labels, and different
+// body copy. `updateTone()` never returns 'ok' for a null.
+//
+// Consent is VERSIONED. `consentVersion` holds exactly the
+// `consent_version` the user was shown; `apply()` sends that back and the
+// backend re-detects inside the worker. If the version moved between the
+// check and the click nothing is built, and the fresh status is rendered
+// as a fresh offer with an explanation — not a bare error.
+//
+// POLLING. Status is a cheap in-memory dict read, but it is still a poll,
+// so it is on a slow timer (30 s) and pauses to 4 s only while a build is
+// actually in flight. Nothing here triggers a check: `image:checkUpdate`
+// detects only and is wired to the explicit "Check for updates" button.
+const UPDATE_POLL_MS        = 30000;   // idle reflection
+const UPDATE_POLL_BUSY_MS   = 4000;    // while building/verifying/checking
+const UPDATE_TONES          = ['muted', 'ok', 'attention', 'warn', 'error', 'progress'];
+
+let updateStatus     = null;   // last payload from image:updateStatus
+let updatePanelOpen  = false;  // the user opened the inline panel
+let consentVersion   = null;   // the exact version offered for consent
+let consentWarning   = null;   // backend-authored one-way-door text
+let applyInFlight    = false;
+let updatePollTimer  = null;
+
+// Which backend states mean "do not nag the user with a button": the update
+// will happen by itself. `unattended` (CHROME_ISOLATION_AUTO_REBUILD=1) is the
+// documented opt-in for exactly that.
+const UPDATE_ACTIVE_STATES = new Set(['checking', 'building', 'verifying']);
+
+/**
+ * Map a status payload to one of UPDATE_TONES.
+ *
+ * The whole point is the tri-state. Note what is NOT here: there is no branch
+ * that returns 'ok' because `update_available` is falsy. 'ok' is reachable only
+ * from the two states the backend reached by POSITIVELY DETERMINING the
+ * installed version is current. Anything else that is not positively known
+ * current lands on 'warn' or 'muted'.
+ */
+function updateTone(s) {
+  if (!s) return 'muted';
+  if (s.policy === 'disabled' || s.state === 'disabled') return 'muted';
+  switch (s.state) {
+    case 'up_to_date':
+      return 'ok';
+    case 'ready':
+      // A rebuild just landed. Not the same claim as 'up_to_date' (which is
+      // re-derived from a fresh check), but not a problem either.
+      return 'ok';
+    case 'update_available':
+      return 'attention';
+    case 'base_eol':
+      // The image's Alpine branch is frozen. Distinct from, and worse than,
+      // "Chromium is behind": the version check will report "up to date"
+      // forever on a frozen index while nothing is patched.
+      return 'error';
+    case 'unknown':
+      // COULD NOT DETERMINE. Not 'ok'. This is the conflation the backend
+      // refuses to make, so the renderer refuses it too.
+      return 'warn';
+    case 'failed':
+    case 'interrupted':
+      return 'error';
+    case 'deferred':
+      return 'attention';
+    case 'checking':
+    case 'building':
+    case 'verifying':
+      return 'progress';
+    case 'idle':
+    case 'disabled':
+    case 'debounced':
+    default:
+      // Nothing is being claimed: no check has run, checks are switched off,
+      // or the floor has not elapsed. Deliberately 'muted' — never 'ok'.
+      return 'muted';
+  }
+}
+
+/** Short chip label. Never says "up to date" for a state that did not prove it. */
+function updateChipLabel(s, tone) {
+  if (!s) return 'Update status unavailable';
+  if (s.policy === 'disabled' || s.state === 'disabled') return 'Updates disabled';
+  switch (s.state) {
+    case 'up_to_date':      return `Up to date (${s.current_version || 'current'})`;
+    case 'ready':           return `Updated to ${s.current_version || 'current'}`;
+    case 'update_available': return `Update available: ${s.latest_version || '?'}`;
+    case 'base_eol':        return 'Base OS end-of-life';
+    case 'unknown':         return 'Could not check';
+    case 'failed':          return 'Update failed';
+    case 'interrupted':     return 'Update interrupted';
+    case 'deferred':        return 'Update deferred';
+    case 'checking':        return 'Checking for updates…';
+    case 'building':        return 'Building image…';
+    case 'verifying':       return 'Verifying image…';
+    case 'idle':            return 'Not checked yet';
+    case 'debounced':       return 'Check pending';
+    case 'disabled':        return 'Updates disabled';
+    default:                return 'Update status unknown';
+  }
+}
+
+/** Panel heading. Again: only 'up_to_date'/'ready' may use the word "current". */
+function updatePanelTitle(s, tone) {
+  if (!s) return 'Chromium update status unavailable';
+  if (s.policy === 'disabled' || s.state === 'disabled') return 'Automatic updates are disabled';
+  switch (s.state) {
+    case 'up_to_date':      return 'Chromium is up to date';
+    case 'ready':           return 'Chromium update installed';
+    case 'update_available': return 'A Chromium update is available';
+    case 'base_eol':        return 'The base operating system is end-of-life';
+    case 'unknown':         return 'Could not determine whether an update exists';
+    case 'failed':          return 'The Chromium update failed';
+    case 'interrupted':     return 'The Chromium update was interrupted';
+    case 'deferred':        return 'The Chromium update was deferred';
+    case 'checking':        return 'Checking for a Chromium update';
+    case 'building':        return 'Rebuilding the browser image';
+    case 'verifying':       return 'Verifying the rebuilt image';
+    case 'idle':            return 'Chromium update status';
+    case 'debounced':       return 'Chromium update check pending';
+    case 'disabled':        return 'Automatic updates are disabled';
+    default:                return 'Chromium update status';
+  }
+}
+
+/**
+ * Body copy.
+ *
+ * `update_available === null` gets its own sentence and never borrows the
+ * up-to-date wording. The rest falls back to the backend's own `last_result`,
+ * which is authored next to the code that produced the state.
+ */
+function updatePanelBody(s, tone) {
+  if (!s) {
+    return 'The update status could not be read from the backend, so this app does not know whether your browser is current.';
+  }
+  if (s.policy === 'disabled' || s.state === 'disabled') {
+    return 'Automatic Chromium updates are switched off. Nothing is checked and nothing is rebuilt until you re-enable them.';
+  }
+
+  const parts = [];
+  switch (s.state) {
+    case 'up_to_date':
+      parts.push(`Chromium ${s.current_version || ''} is the newest version available.`.replace(/\s+/g, ' ').trim());
+      break;
+    case 'ready':
+      parts.push(`Chromium ${s.current_version || ''} is now installed. Existing containers still run the image they were created from; relaunch a profile to pick it up.`);
+      break;
+    case 'update_available':
+      parts.push(`Chromium ${s.current_version || '?'} is installed and ${s.latest_version || '?'} is available. Nothing has been rebuilt — this app will not replace your browser without your approval.`);
+      break;
+    case 'base_eol':
+      // The notice is the backend's, with the branch names filled in.
+      parts.push(s.base_eol_notice || 'The base operating system is no longer supported.');
+      break;
+    case 'unknown':
+      parts.push('The last check could not determine whether a newer Chromium exists. That is NOT the same as being up to date: this browser may be behind, and nothing here can tell you. Treat this as unverified, not as fine.');
+      break;
+    case 'failed':
+    case 'interrupted':
+      parts.push('The rebuild failed. Your existing image was left untouched and is still working — nothing was replaced.');
+      break;
+    case 'deferred':
+      parts.push('The rebuild was postponed because a profile is currently running.');
+      break;
+    case 'checking':
+      parts.push('Asking the package index what the newest Chromium is.');
+      break;
+    case 'building':
+      parts.push('Building a new image under a staging tag. The image you are using is not touched until the new one has been built and verified.');
+      break;
+    case 'verifying':
+      parts.push('Checking the newly built image before it replaces the current one.');
+      break;
+    default:
+      parts.push('No update check has completed yet.');
+  }
+
+  if (s.policy === 'unattended') {
+    parts.push('Unattended updates are enabled, so this rebuild happens on its own — there is nothing for you to approve.');
+  }
+  if (s.retry_in_seconds && ['up_to_date', 'ready', 'update_available', 'unknown', 'base_eol', 'debounced'].includes(s.state)) {
+    const mins = Math.max(1, Math.round(Number(s.retry_in_seconds) / 60));
+    parts.push(`Next automatic check in about ${mins} minute${mins === 1 ? '' : 's'}.`);
+  }
+  if (s.last_result) parts.push(s.last_result);
+  return parts.join(' ');
+}
+
+function updateVersionsLabel(s) {
+  if (!s) return '';
+  const cur = s.current_version;
+  const lat = s.latest_version;
+  if (cur && lat && cur !== lat) return `${cur} → ${lat}`;
+  if (cur) return cur;
+  if (lat) return lat;
+  return '';
+}
+
+/**
+ * Fetch status and render. `forceOpen` is used when the user clicked the chip
+ * so the panel opens even if the payload came back empty.
+ */
+async function refreshUpdateStatus(forceOpen) {
+  let s = null;
+  try {
+    s = await window.api.image.status();
+  } catch (e) {
+    s = null;
+  }
+  updateStatus = s;
+
+  // Consent is tied to the exact version on offer, and the warning travels
+  // with it. Both come from the payload; the renderer keeps no copy of either.
+  consentVersion = (s && s.consent_required && s.consent_version) ? s.consent_version : null;
+  consentWarning = (s && typeof s.consent_warning === 'string' && s.consent_warning)
+    ? s.consent_warning : null;
+
+  if (forceOpen) updatePanelOpen = true;
+  renderUpdate();
+  scheduleUpdatePoll(s);
+}
+
+/**
+ * Apply click handler.
+ *
+ * The version-moved case: the backend refuses to substitute a different
+ * version for the one that was approved, and returns a refreshed status.
+ * So on ANY refusal we re-read the status and compare what is now on offer
+ * with what the user approved. If they differ, the panel says so in words and
+ * the Apply button is re-armed for the NEW version — the user consents again
+ * to what is actually on offer, rather than being shown a bare error.
+ */
+async function applyConsentedUpdate() {
+  if (!consentVersion || applyInFlight) return;
+  const approved = consentVersion;      // exactly what the user was shown
+  applyInFlight = true;
+  renderUpdate();
+
+  let result = null;
+  try {
+    result = await window.api.image.apply(approved);
+  } catch (e) {
+    result = null;
+    toast(`Could not apply the update: ${e.message}`, 'error');
+  }
+  applyInFlight = false;
+
+  // The apply response carries its own status snapshot; prefer it, then fall
+  // back to a fresh poll.
+  if (result && result.status) updateStatus = result.status;
+  await refreshUpdateStatus(false);
+
+  const nowOnOffer = consentVersion;
+
+  if (result && result.started === false) {
+    if (nowOnOffer && nowOnOffer !== approved) {
+      // THE VERSION MOVED. Nothing was built; say what happened and why, and
+      // let the button re-arm for the new version.
+      toast(`Chromium ${approved} was approved, but ${nowOnOffer} is what is actually available now. Nothing was rebuilt — review and approve again.`, 'error', 9000);
+    } else if (result.reason === 'no_update_available') {
+      toast('There is no version available to approve right now, so nothing was rebuilt.', 'info');
+    } else if (result.reason === 'disabled') {
+      toast('Updates are disabled, so nothing was rebuilt.', 'info');
+    } else if (result.reason === 'debounced') {
+      toast('Too soon after the last attempt — nothing was rebuilt.', 'info');
+    } else if (result.reason === 'in_progress') {
+      toast('Another update attempt is already running.', 'info');
+    } else {
+      toast(`Update not applied: ${result.detail || result.reason || 'the backend refused'}`, 'error', 8000);
+    }
+    return;
+  }
+
+  if (nowOnOffer && nowOnOffer !== approved) {
+    toast(`Chromium ${approved} was approved, but ${nowOnOffer} is what is actually available now. Nothing was rebuilt — review and approve again.`, 'error', 9000);
+    return;
+  }
+  toast(`Rebuilding Chromium ${approved}. Your current image stays untouched until the new one is verified.`, 'success');
+}
+
+function renderUpdate() {
+  const s = updateStatus;
+  const tone = updateTone(s);
+
+  const chip = document.getElementById('btnUpdateChip');
+  const label = document.getElementById('updateChipLabel');
+  if (chip.dataset.tone !== tone) chip.dataset.tone = tone;
+  const text = updateChipLabel(s, tone);
+  if (label.textContent !== text) label.textContent = text;
+
+  const panel = document.getElementById('updatePanel');
+  const open = updatePanelOpen && !!s && tone !== 'muted';
+  panel.hidden = !open;
+  chip.setAttribute('aria-expanded', open ? 'true' : 'false');
+  if (!open) return;
+
+  if (panel.dataset.tone !== tone) panel.dataset.tone = tone;
+  document.getElementById('updatePanelTitle').textContent = updatePanelTitle(s, tone);
+  document.getElementById('updatePanelVersions').textContent = updateVersionsLabel(s);
+  document.getElementById('updatePanelBody').textContent = updatePanelBody(s, tone);
+
+  // The one-way-door warning, verbatim from the payload, shown BEFORE the
+  // Apply button can be pressed. Not a rewrite — `esc`/textContent carries it
+  // through unaltered.
+  const warnEl = document.getElementById('updateConsentWarning');
+  if (consentWarning && consentVersion) {
+    warnEl.textContent = consentWarning;
+    warnEl.hidden = false;
+  } else {
+    warnEl.textContent = '';
+    warnEl.hidden = true;
+  }
+
+  // Error / last result detail on a failed attempt.
+  const errEl = document.getElementById('updateErrorDetail');
+  const detail = (s && (s.error || s.last_result)) || '';
+  if (s && (s.state === 'failed' || s.state === 'interrupted') && detail) {
+    errEl.textContent = s.error ? s.error : s.last_result;
+    errEl.hidden = false;
+  } else {
+    errEl.textContent = '';
+    errEl.hidden = true;
+  }
+
+  // The Apply button. Offered ONLY when a specific version is on offer and
+  // consented-to, and NOT under `unattended` (it would rebuild by itself) or
+  // `disabled` (nothing would happen). Labelled from the backend's own
+  // one-line form.
+  const applyBtn = document.getElementById('btnApplyUpdate');
+  const unattended = s && s.policy === 'unattended';
+  const showApply = !!(consentVersion && consentWarning && !unattended
+                       && s.policy !== 'disabled' && !applyInFlight);
+  applyBtn.hidden = !showApply;
+  if (showApply) {
+    applyBtn.textContent = s.consent_warning_short
+      ? `Apply update to ${consentVersion} — ${s.consent_warning_short}`
+      : `Apply update to ${consentVersion}`;
+    applyBtn.disabled = false;
+  }
+
+  document.getElementById('btnCheckUpdate').disabled =
+    !!(s && UPDATE_ACTIVE_STATES.has(s.state)) || applyInFlight;
+}
+
+/**
+ * Poll timer. Slow by default; only tightens while a build is actually
+ * running, so the UI shows progress without a permanent fast loop. Never
+ * starts a check — reflecting state is all this does.
+ */
+function scheduleUpdatePoll(s) {
+  if (updatePollTimer) clearTimeout(updatePollTimer);
+  const busy = !!(s && UPDATE_ACTIVE_STATES.has(s.state));
+  const delay = busy ? UPDATE_POLL_BUSY_MS : UPDATE_POLL_MS;
+  updatePollTimer = setTimeout(() => {
+    refreshUpdateStatus(false);
+  }, delay);
+}
+
+document.getElementById('btnUpdateChip')?.addEventListener('click', () => {
+  updatePanelOpen = !updatePanelOpen;
+  renderUpdate();
+});
+
+document.getElementById('btnUpdatePanelClose')?.addEventListener('click', () => {
+  updatePanelOpen = false;
+  renderUpdate();
+});
+
+document.getElementById('btnApplyUpdate')?.addEventListener('click', applyConsentedUpdate);
+
+// "Check for updates" DETECTS ONLY. It never builds: a rebuild needs the
+// Apply button, which carries the versioned consent.
+document.getElementById('btnCheckUpdate')?.addEventListener('click', async () => {
+  try {
+    const r = await window.api.image.check();
+    if (r && r.status) updateStatus = r.status;
+  } catch (e) {
+    toast(`Update check failed: ${e.message}`, 'error');
+  }
+  await refreshUpdateStatus(false);
+});
+
 // ── Auto-refresh every 5 s ────────────────────────────────────────────────────
 setInterval(loadProfiles, 5000);
 
@@ -572,3 +963,4 @@ document.querySelectorAll('.modal-overlay').forEach(overlay => {
 // ── Initial load ──────────────────────────────────────────────────────────────
 loadProfiles();
 loadProxies();
+refreshUpdateStatus(false);

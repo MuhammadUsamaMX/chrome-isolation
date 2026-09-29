@@ -19,6 +19,19 @@
         <line x1="9" y1="3" x2="9" y2="21"/>
       </svg>
       <span class="titlebar-title">Chrome Isolation</span>
+      <!-- Chromium update indicator.
+           Deliberately NOT a claim of anything the app does not do: it is a
+           plain toggle button over a plain inline panel (no role="dialog", no
+           aria-modal, no overlay). aria-expanded/aria-controls are true
+           statements about the panel below, which really does show and hide.
+           aria-live="polite" is on the label span so a state change is
+           announced without moving focus anywhere. -->
+      <button class="update-chip" id="btnUpdateChip"
+              data-tone="muted"
+              aria-expanded="false" aria-controls="updatePanel">
+        <span class="update-chip-dot" aria-hidden="true"></span>
+        <span class="update-chip-label" id="updateChipLabel" aria-live="polite">Checking…</span>
+      </button>
     </div>
     <div class="titlebar-controls">
       <button class="wc-btn wc-theme" id="btnTheme" title="Toggle light/dark" aria-label="Toggle theme">
@@ -213,6 +226,55 @@
           </div>
         </div>
       </div>
+
+      <!-- Chromium update panel — INLINE, NOT A MODAL.
+           No role="dialog", no aria-modal, no aria-labelledby: the app has no
+           focus trap and no focus management, so any modal claim here would be
+           the same unbacked claim commit c6405d5 reverted from the four
+           overlays. This panel is a sibling of the profile grid: the rest of
+           the page stays reachable and operable, which is exactly what it
+           would be if it were not there at all. That is honest, and it is why
+           there is no modal ARIA to honour.
+
+           The chip that toggles it is a plain button, and aria-expanded /
+           aria-controls are true statements about this panel, which really
+           does show and hide. They are NOT a claim of inertness: there is no
+           focus trap and no focus management, so `aria-modal` would be the
+           same overstatement commit c6405d5 reverted. The panel is a plain
+           sibling of the profile grid, and the rest of the page stays
+           reachable and operable — which is exactly what it would be if it
+           did not exist at all. That honesty is the reason there is no modal
+           ARIA here to honour.
+
+           Every visible string in this panel is written from the status payload
+           (consent_warning, consent_warning_short, base_eol_notice,
+           base_eol_notice_short, last_result, error, the version numbers). The
+           renderer supplies only the tone/label vocabulary in app.js, never the
+           one-way-door text — that wording lives in backend/image_update.py so
+           it cannot drift from what the code means. -->
+      <section class="update-panel" id="updatePanel" hidden>
+        <div class="update-panel-head">
+          <span class="update-panel-dot" id="updatePanelDot" aria-hidden="true"></span>
+          <h2 class="update-panel-title" id="updatePanelTitle">Chromium update</h2>
+          <span class="update-panel-versions" id="updatePanelVersions"></span>
+          <button class="update-panel-close" id="btnUpdatePanelClose"
+                  title="Hide Chromium update details" aria-label="Hide Chromium update details">✕</button>
+        </div>
+
+        <p class="update-panel-body" id="updatePanelBody"></p>
+
+        <!-- The one-way door. Filled verbatim from `consent_warning`; visible
+             BEFORE the Apply button is pressed, not after. -->
+        <p class="update-consent-warning" id="updateConsentWarning" hidden></p>
+
+        <!-- Populated only from `error` / `last_result` on a failed attempt. -->
+        <p class="update-error-detail" id="updateErrorDetail" hidden></p>
+
+        <div class="update-panel-actions">
+          <button class="btn btn-primary btn-sm" id="btnApplyUpdate" hidden></button>
+          <button class="btn btn-secondary btn-sm" id="btnCheckUpdate">Check for updates</button>
+        </div>
+      </section>
 
       <div id="profilesGrid" class="profiles-grid">
         <div class="empty-state" id="emptyState" style="display:none;">
