@@ -236,6 +236,98 @@ body {
   box-shadow: 0 0 6px var(--danger);
 }
 
+/* ── Chromium update indicator + panel ──────────────────────
+   TONES ARE THE POINT. `ok` (green) means positively determined up to date.
+   `warn` (amber) means COULD NOT DETERMINE and is deliberately a different
+   tone from `ok`: an unchecked browser must never wear the colour of a checked
+   one. `attention` (blue) is a pending update, `error` (red) is a failure or an
+   end-of-life base, `progress` is a build in flight, `muted` is nothing to say.
+   The tones are class suffixes, so a missing tone renders as unstyled — never
+   as green. */
+.update-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: .4rem;
+  margin-left: .8rem;
+  padding: .28rem .7rem;
+  border-radius: 99px;
+  border: 1px solid var(--border);
+  background: var(--bg3);
+  color: var(--text2);
+  font-size: .7rem;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  max-width: 240px;
+}
+.update-chip:hover { background: var(--bg2); }
+.update-chip-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.update-chip-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex-shrink: 0; }
+.update-chip[data-tone="ok"]        { color: var(--success); border-color: var(--success); }
+.update-chip[data-tone="attention"] { color: var(--primary);  border-color: var(--primary); }
+.update-chip[data-tone="warn"]      { color: var(--warning);  border-color: var(--warning); }
+.update-chip[data-tone="error"]     { color: var(--danger);   border-color: var(--danger); }
+.update-chip[data-tone="progress"]  { color: var(--primary);  border-color: var(--primary); }
+.update-chip[data-tone="progress"] .update-chip-dot { animation: updatePulse 1.4s ease-in-out infinite; }
+@keyframes updatePulse { 0%,100% { opacity: 1; } 50% { opacity: .25; } }
+
+.update-panel {
+  margin: .8rem 2rem 0;
+  padding: .9rem 1.1rem;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--text2);
+  border-radius: var(--radius-sm);
+  background: var(--bg3);
+  display: flex;
+  flex-direction: column;
+  gap: .5rem;
+  flex-shrink: 0;
+}
+.update-panel[hidden] { display: none; }
+.update-panel[data-tone="ok"]        { border-left-color: var(--success); }
+.update-panel[data-tone="attention"] { border-left-color: var(--primary); }
+.update-panel[data-tone="warn"]      { border-left-color: var(--warning); }
+.update-panel[data-tone="error"]     { border-left-color: var(--danger); }
+.update-panel[data-tone="progress"]  { border-left-color: var(--primary); }
+.update-panel-head { display: flex; align-items: center; gap: .5rem; }
+.update-panel-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text2); flex-shrink: 0; }
+.update-panel[data-tone="ok"]        .update-panel-dot { background: var(--success); }
+.update-panel[data-tone="attention"] .update-panel-dot { background: var(--primary); }
+.update-panel[data-tone="warn"]      .update-panel-dot { background: var(--warning); box-shadow: 0 0 6px var(--warning); }
+.update-panel[data-tone="error"]     .update-panel-dot { background: var(--danger);  box-shadow: 0 0 6px var(--danger); }
+.update-panel[data-tone="progress"]  .update-panel-dot { background: var(--primary); animation: updatePulse 1.4s ease-in-out infinite; }
+.update-panel-title { font-size: .92rem; font-weight: 700; letter-spacing: -.01em; }
+.update-panel-versions { font-size: .74rem; color: var(--text2); margin-left: auto; }
+.update-panel-close {
+  border: none; background: transparent; color: var(--text2);
+  cursor: pointer; font-size: .8rem; padding: .15rem .35rem; border-radius: 6px;
+}
+.update-panel-close:hover { background: var(--bg2); color: var(--text); }
+.update-panel-body { font-size: .8rem; color: var(--text); line-height: 1.45; }
+.update-consent-warning {
+  font-size: .78rem;
+  line-height: 1.5;
+  padding: .6rem .75rem;
+  border-radius: 8px;
+  background: var(--warning-soft, rgba(245, 166, 35, .12));
+  border: 1px solid rgba(245, 166, 35, .38);
+  color: var(--text);
+}
+.update-consent-warning[hidden] { display: none; }
+.update-error-detail {
+  font-size: .76rem;
+  line-height: 1.45;
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  padding: .55rem .7rem;
+  border-radius: 8px;
+  background: var(--danger-soft);
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.update-error-detail[hidden] { display: none; }
+.update-panel-actions { display: flex; gap: .5rem; flex-wrap: wrap; }
+
 /* ── Content ───────────────────────────────────────────────── */
 .content { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
 .content-header {
