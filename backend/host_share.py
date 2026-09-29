@@ -23,16 +23,25 @@ GUARANTEE is narrower than "any explicit path is fine":
 
 WHAT CAN AND CANNOT BE SHARED EXPLICITLY
 ----------------------------------------
-  ALLOWED   a dedicated directory, and a *subfolder* of your own home
-            (e.g. ~/share) — nothing in the home folder itself is exempt.
-  REFUSED   the home directory itself, however it is spelled: `~`, `~/`,
-            `$HOME`, the expanded absolute path, or `~/.gnupg/..`.
-            `/home` is in `_FORBIDDEN_ROOTS` only as an exact match so that
-            subfolders stay shareable; that same exemption is why the home
-            directory needed its own explicit check, and it has one
-            (`_reject_home_itself`).
+  ALLOWED   a dedicated directory, including a subfolder of your own home
+            (e.g. ~/share, ~/Downloads) that is not itself named below.
+            Being *in* the home directory confers nothing: every entry in
+            the REFUSED lists below also lives in the home directory. The
+            home directory itself is never shareable, however it is spelled.
+  REFUSED   the home directory itself: `~`, `~/`, `$HOME`, the expanded
+            absolute path, or `~/.gnupg/..`. `/home` is in
+            `_FORBIDDEN_ROOTS` only as an exact match so that subfolders stay
+            shareable; that same exemption is why the home directory needed
+            its own explicit check, and it has one (`_reject_home_itself`).
   REFUSED   system roots/subtrees and credential stores (~/.ssh, ~/.gnupg,
             keyrings, …) regardless of symlinks or `..` traversal.
+  REFUSED   this app's own storage, and every real browser profile store we
+            can name — see `_app_owned_roots()`. The first is what this app
+            exists to keep apart from itself (the other profiles' cookies,
+            logins and history, plus `profiles.json`/`proxies.json`); the
+            second is the same harm reached through real Chrome's tree. Both
+            are one field away in the Edit modal, so "the user chose it" is
+            not a reason to allow them.
 
 Default share path format::
 
@@ -46,6 +55,7 @@ and that contains no host secrets.
 import os
 import stat
 
+import paths
 from config import APP_DATA_DIR, HOST_SHARES_DIR
 from validator import validate_profile_name
 
@@ -64,6 +74,16 @@ _FORBIDDEN_ROOTS = frozenset({
 # directory *itself* is refused explicitly by `_reject_home_itself` (otherwise
 # `~`, `~/` and `~/.gnupg/..` would resolve to the whole home dir and re-arm
 # the F1 finding).
+#
+# THE ACCURATE GUARANTEE, because `/home` being exempt is easy to over-read:
+# being a subfolder of your home is NECESSARY but not SUFFICIENT for a path to
+# be shareable. Three further named deny-lists cut into the home directory:
+#   * `_SENSITIVE_HOME_SUBPATHS` — credential stores;
+#   * `_BROWSER_PROFILE_DIRS`     — real browsers' own storage;
+#   * `_app_owned_roots()`        — this app's own storage (its profile store,
+#     its data directory), read from `paths.py` so it cannot drift from where
+#     the app actually keeps its data.
+# A subfolder of home that is none of those (~/share, ~/Downloads) is allowed.
 _FORBIDDEN_SUBTREES = frozenset({
     '/bin', '/boot', '/dev', '/etc', '/lib', '/lib32', '/lib64', '/libx32',
     '/opt', '/proc', '/root', '/run', '/sbin', '/srv', '/sys', '/usr', '/var',
@@ -87,6 +107,67 @@ _SENSITIVE_HOME_SUBPATHS = (
     os.path.join('.local', 'share', 'keyrings'),
     os.path.join('.local', 'share', 'kwalletd'),
 )
+
+# Real browsers' own storage, relative to the home directory.
+#
+# WHY THIS IS HERE AND NOT A "NOBODY WOULD DO THAT" ARGUMENT: F1 was opened
+# because an *explicit* host mount defaulted to the whole home directory, which
+# handed every container every OTHER browser profile on the box. Naming the app's
+# own profile store without also naming real Chrome's leaves the original harm
+# fully reachable — `~/.config/google-chrome` is one field away in the Edit
+# modal and holds the same cookies, logins and history that F1 was about. The
+# profile-store relocation commit did not change that; it only moved our copy
+# of the data to a fresh name. So both halves are refused.
+#
+# A store this list does not name is not thereby approved — it is merely not
+# recognised. The list cannot be exhaustive (users install browsers into
+# arbitrary locations), and the residual risk is a deliberately typed path to
+# a browser profile store whose name we do not know. That is a much smaller
+# hole than "every browser profile is one field away", and it is the honest
+# limit of a name-based check.
+_BROWSER_PROFILE_DIRS = (
+    # Chrome / Chromium and their channels
+    os.path.join('.config', 'google-chrome'),
+    os.path.join('.config', 'google-chrome-beta'),
+    os.path.join('.config', 'google-chrome-dev'),
+    os.path.join('.config', 'google-chrome-unstable'),
+    os.path.join('.config', 'google-chrome-for-testing'),
+    os.path.join('.config', 'chromium'),
+    os.path.join('.config', 'chromium-browser'),
+    # Firefox / Gecko family
+    os.path.join('.mozilla'),                     # also covers firefox/ and librewolf/
+    os.path.join('.librewolf'),
+    os.path.join('.thunderbird'),
+    os.path.join('.gnome2', 'epiphany'),
+    # Other Chromium browsers
+    os.path.join('.config', 'BraveSoftware'),
+    os.path.join('.config', 'microsoft-edge'),
+    os.path.join('.config', 'opera'),
+    os.path.join('.config', 'vivaldi'),
+    os.path.join('.config', 'com.donutbrowser'),
+    # Flatpak installs, whose user data lives under ~/.var/app/<id>
+    os.path.join('.var', 'app', 'com.google.Chrome'),
+    os.path.join('.var', 'app', 'org.mozilla.firefox'),
+    os.path.join('.var', 'app', 'com.brave.Browser'),
+    # ~/.config ITSELF, as a subtree. Every Chrome/Chromium/Brave/Edge entry
+    # above lives under it, so allowing it would hand out all of them at once
+    # and make the entire list above decorative. Concretely,
+    # `~/.config/google-chrome/..` realpaths to `~/.config`, so without this
+    # entry the google-chrome refusal could be bypassed with one `..`.
+    # It is refused as a SUBTREE, so `~/.config/<something-else>` is refused
+    # too: an unrecognised app's config may hold credentials too, and the
+    # honest position is that this directory is not shareable. The cost is
+    # real -- some users legitimately want a config file -- and that trade is
+    # stated here rather than discovered later.
+    os.path.join('.config'),
+)
+
+# Reasons used in the refusal message, so the UI/log can say WHICH rule fired.
+_REASON_PROFILE_STORE = "a Chrome Isolation profile store"
+_REASON_APP_DATA = ("Chrome Isolation's data directory "
+                   "(profiles.json, proxies.json, host-shares)")
+_REASON_HOST_SHARES = "another profile's host-share directory"
+_REASON_BROWSER_STORE = "a browser profile store"
 
 
 def host_share_dir(profile_name: str) -> str:
@@ -164,6 +245,89 @@ def _reject_sensitive(path: str) -> None:
             )
 
 
+def _app_owned_roots():
+    """
+    Every path this app must never hand to a container, as `(root, reason)`
+    pairs, each `root` fully resolved so the caller's already-realpath'd path
+    can be compared against it directly.
+
+    Two families:
+
+      * THIS APP'S OWN STORAGE. The profile store (every OTHER profile's
+        cookies, logins and history — precisely what F1 was opened for), the
+        legacy store, and the data directory holding `profiles.json` (all
+        profile names plus proxy URLs, which may carry `user:pass@`
+        credentials), `proxies.json` and the other profiles' `host-shares/`.
+        All of these are read from `backend/paths.py`, the single source of
+        truth for where this app keeps data, so relocating the store cannot
+        leave a stale copy of the path in the deny-list.
+
+      * REAL BROWSER STORES, from `_BROWSER_PROFILE_DIRS`.
+
+    Computed per call, like `_home_dir()`, because a test (or `su`) can change
+    $HOME and `$CHROME_ISOLATION_HOME` between calls.
+    """
+    home = _home_dir()
+    roots = []
+
+    def add(raw, reason):
+        if not raw or not isinstance(raw, str):
+            return
+        try:
+            resolved = os.path.realpath(raw)
+        except OSError:
+            return
+        # Two entries must never appear, because either would refuse more than
+        # the rule intends: the filesystem root (already refused by the
+        # _FORBIDDEN_ROOTS check) and the home directory itself. The home
+        # directory is where every OTHER entry below lives, so listing it here
+        # would refuse every subfolder of home and silently destroy the
+        # "a subfolder of your own home is shareable" behaviour. It is refused
+        # exactly once, by _reject_home_itself(), which is checked first.
+        if resolved in ('', os.sep) or resolved == home:
+            return
+        roots.append((resolved, reason))
+
+    # -- this app's own storage, from paths.py -----------------------------
+    add(paths.isolation_home(), _REASON_PROFILE_STORE)
+    add(paths.default_profiles_dir(), _REASON_PROFILE_STORE)
+    add(paths.legacy_profiles_dir(), _REASON_PROFILE_STORE)
+    add(paths.resolve_profiles_dir(), _REASON_PROFILE_STORE)
+    try:
+        add(paths.other_profiles_dir(), _REASON_PROFILE_STORE)
+    except OSError:
+        pass
+    add(APP_DATA_DIR, _REASON_APP_DATA)
+    add(HOST_SHARES_DIR, _REASON_HOST_SHARES)
+
+    # -- real browsers' own storage ----------------------------------------
+    for sub in _BROWSER_PROFILE_DIRS:
+        add(os.path.join(home, sub), _REASON_BROWSER_STORE)
+
+    return roots
+
+
+def _reject_app_storage(path: str) -> None:
+    """
+    Raise ValueError if `path` is (or lives inside) this app's own storage or a
+    real browser profile store.
+
+    `path` must already be realpath'd — `validate_host_mount()` resolves before
+    calling, so a `..` escape and a symlink pointing at any of these roots is
+    caught by the same comparison a plainly-typed path is. That is the same
+    pair-of-checks shape as `_reject_home_itself`/`_reject_sensitive`, and it
+    is why `~/Isolated-Chrome/profiles/Zoom-1/../Fiverr-Read/Default` and
+    `~/share -> ~/Isolated-Chrome/profiles` are both refused.
+    """
+    for root, reason in _app_owned_roots():
+        if _is_within(path, root):
+            raise ValueError(
+                f"Refusing to mount {reason}: {path}. "
+                "The host folder must be a dedicated directory you keep for "
+                "sharing, not profile data."
+            )
+
+
 def validate_host_mount(raw: str) -> str:
     """
     Validate and normalize a user-supplied `host_mount`.
@@ -178,8 +342,15 @@ def validate_host_mount(raw: str) -> str:
       * the user's home directory itself, in any spelling (`~`, `~/`,
         `$HOME`, `~/.gnupg/..`) — subfolders of home remain allowed
       * credential stores (~/.ssh, ~/.gnupg, keyrings, …)
-      * path traversal or symlinks that resolve into either of the above
+      * this app's own storage — the profile store (this or any other), the
+        legacy store, and the data directory holding `profiles.json`,
+        `proxies.json` and the other profiles' `host-shares/`
+      * real browsers' own storage (~/.config/google-chrome, ~/.mozilla, …)
+      * path traversal or symlinks that resolve into any of the above
       * anything that is not an existing directory
+
+    Note the order: the deny-lists are consulted BEFORE `os.path.isdir()`, so a
+    denied path is refused as a policy violation whether or not it exists.
     """
     if raw is None:
         return ''
@@ -217,6 +388,10 @@ def validate_host_mount(raw: str) -> str:
     # `~/.gnupg/..` would all slip past the checks above.)
     _reject_home_itself(resolved)
     _reject_sensitive(resolved)
+    # This app's own storage and real browsers' own storage. `resolved` is
+    # already realpath'd, so `..` and symlink spellings of these roots are
+    # caught by the same comparison a plainly-typed path is.
+    _reject_app_storage(resolved)
 
     if not os.path.isdir(resolved):
         raise ValueError(f"Host folder not found: {resolved}")

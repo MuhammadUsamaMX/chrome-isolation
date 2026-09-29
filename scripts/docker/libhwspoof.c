@@ -34,7 +34,9 @@
  * resolves correctly here — that hypothesis was tested and is false. musl does
  * NOT export open64/openat64/fopen64 at all (and the linker refuses to resolve
  * them), so those three hooks are unreachable on this platform; they are kept
- * for glibc builds and fall through to the raw syscall if ever called.
+ * for glibc builds and fall through to the raw syscall if ever called. Which
+ * symbols are optional, and the evidence for that claim, is documented on
+ * `hwspoof_symbols` below.
  */
 #define _GNU_SOURCE
 #include <dlfcn.h>
@@ -72,11 +74,89 @@ struct hwspoof_sockaddr_ll {
 };
 
 /*
- * Set to 1 while every libc pointer resolved, and cleared to 0 by the load
- * probe the moment any dlsym(RTLD_NEXT, ...) fails. hardware-spoof.sh reads the
- * constructor's probe file to decide whether to export LD_PRELOAD, so this is
- * the difference between "the shim loaded" and "the shim actually works".
- * Declared here because the constructor below is the first thing that writes it.
+ * The complete set of libc symbols this shim interposes, resolved ONCE in the
+ * constructor (see hwspoof_probe below). Every hook reads its pointer from
+ * here instead of calling dlsym() itself, which is what makes the load probe
+ * meaningful: the probe measures the very same pointers the hooks will use.
+ *
+ * Before this, each hook resolved its own pointer lazily on first call, and the
+ * constructor independently dlsym'd two of them ("open", "uname"). That is not
+ * the same set, so a shim in which every RESOLVE failed still passed the
+ * constructor's check on those two names and reported "loaded" — with
+ * sysinfo(), fopen(), openat() and getifaddrs() all dead. (The behaviour was
+ * still safe: every hook except getifaddrs() falls back to the raw syscall, so
+ * the browser kept working. It was the *proof* that was wrong, not the code.)
+ *
+ * The struct is written through a per-symbol table so the probe can enumerate
+ * exactly what the hooks need and report precisely which symbol failed.
+ */
+struct hwspoof_sym {
+    const char *name;
+    void       **slot;       /* where the resolved pointer is stored */
+    int         optional;    /* 1 = absent on this libc, absence is normal */
+    const char *why_optional;
+};
+
+static int (*real_open)(const char *, int, ...);
+static int (*real_open64)(const char *, int, ...);
+static int (*real_openat)(int, const char *, int, ...);
+static int (*real_openat64)(int, const char *, int, ...);
+static FILE *(*real_fopen)(const char *, const char *);
+static FILE *(*real_fopen64)(const char *, const char *);
+static int (*real_sysinfo)(struct sysinfo *);
+static int (*real_uname)(struct utsname *);
+static int (*real_getifaddrs)(struct ifaddrs **);
+static void (*real_freeifaddrs)(struct ifaddrs *);
+
+/*
+ * "optional" is a claim about a SPECIFIC libc, and it has to be backed by
+ * evidence rather than by recollection — hence the comments.
+ *
+ *   open64 / openat64 / fopen64
+ *       musl does not export them at all. Evidence, not recollection: the
+ *       Alpine 3.24 image's /lib/ld-musl-x86_64.so.1 was extracted and
+ *       `nm -D --defined-only` run on it — it lists open, openat, fopen,
+ *       sysinfo, uname, getifaddrs, freeifaddrs and fdopen, and no `*64`
+ *       variant of any of them. Demanding these would condemn the shim on the
+ *       very platform it is built for, so they are optional. They still have
+ *       raw-syscall fallbacks, so on a glibc build (where they do resolve)
+ *       they work as before.
+ *
+ *   getifaddrs / freeifaddrs
+ *       Exported by musl, so they do resolve on the target platform. They are
+ *       marked optional anyway, for a different reason: getifaddrs() has NO
+ *       raw-syscall equivalent (it builds a malloc'd list inside libc), so an
+ *       unresolved getifaddrs() degrades to a -1 return rather than to a
+ *       crash, and that path is off everything the browser needs in order to
+ *       start. A shim that can open, read and report but cannot rewrite the
+ *       MAC is still worth loading; the gate must not throw it away. The
+ *       same reasoning means a *musl* build must not be condemned over it
+ *       either — hence optional rather than required.
+ */
+static struct hwspoof_sym hwspoof_symbols[] = {
+    { "open",         (void **)&real_open,         0, NULL },
+    { "openat",       (void **)&real_openat,       0, NULL },
+    { "fopen",        (void **)&real_fopen,        0, NULL },
+    { "sysinfo",      (void **)&real_sysinfo,      0, NULL },
+    { "uname",        (void **)&real_uname,        0, NULL },
+    { "open64",       (void **)&real_open64,       1, "not exported by musl" },
+    { "openat64",     (void **)&real_openat64,     1, "not exported by musl" },
+    { "fopen64",      (void **)&real_fopen64,      1, "not exported by musl" },
+    { "getifaddrs",   (void **)&real_getifaddrs,   1, "no raw-syscall fallback; "
+                                                      "MAC rewrite is optional" },
+    { "freeifaddrs",  (void **)&real_freeifaddrs,  1, "pairs with getifaddrs" },
+};
+
+#define HWSHIM_SYMBOL_COUNT \
+    ((int)(sizeof(hwspoof_symbols) / sizeof(hwspoof_symbols[0])))
+
+/*
+ * Set to 1 while every REQUIRED libc pointer resolved, and cleared to 0 by the
+ * load probe the moment any of them fails. hardware-spoof.sh reads the
+ * constructor's probe FILE to decide whether to export LD_PRELOAD, so the
+ * probe verdict — not this variable alone — is what "the shim is usable"
+ * means at runtime. Declared here because the constructor below is the first
+ * thing that writes it.
  */
 int hwspoof_hooks_usable = 1;
 
@@ -89,28 +169,44 @@ int hwspoof_hooks_usable = 1;
  * to a path and checks the file afterwards. Raw syscalls are used so the probe
  * cannot recurse through our own open() hook.
  *
- * Crucially this writes "loaded" only if the hooks are genuinely usable. An
- * earlier revision wrote "loaded" unconditionally, which meant a shim whose
- * dlsym(RTLD_NEXT) calls all failed was accepted by the activation check —
- * and such a shim makes every open() in the process fail, so the browser could
- * not be exec'd at all. A shim that reports itself broken is safe; one that
- * lies about being healthy is not. The status word is written so the script can
- * distinguish the two.
+ * WHAT THIS ACTUALLY PROVES, precisely — the earlier version of this comment
+ * over-claimed, and the code with it:
+ *
+ *   It resolves every symbol in hwspoof_symbols, through the same table the
+ *   hooks read, and reports "loaded" only if every REQUIRED one resolved. So
+ *   "loaded" means: the loader accepted the object, and every hook this libc
+ *   is expected to provide is live and will interpose.
+ *
+ *   It does NOT prove the shim's *effects* — that /proc/meminfo is actually
+ *   redirected, that a specific path is allow-listed, or that the spoof tree
+ *   exists. Those depend on CHROME_SPOOF_ROOT and on the callers actually going
+ *   through libc, which is precisely the gap this shim cannot close (see the
+ *   header comment). scripts/verify.sh check 4 measures the effects end to end;
+ *   this probe is a build-time gate on the mechanism, not on the outcome.
+ *
+ *   An earlier revision wrote "loaded" unconditionally, which let a shim whose
+ *   dlsym(RTLD_NEXT) calls all failed pass the build gate and ship. A shim that
+ *   reports itself broken is safe; one that lies about being healthy is not.
  */
 __attribute__((constructor))
 static void hwspoof_probe(void)
 {
     const char *p = getenv("CHROME_SPOOF_PROBE");
+    int i;
     long fd;
     const char *msg;
     int len;
 
-    /* Prove the two hooks that must work for the shim to be worth loading at
-     * all: if open() cannot be resolved the process cannot even start, and if
-     * uname() cannot be resolved there is nothing to spoof. Resolve both here
-     * so hwspoof_hooks_usable reflects reality before any caller runs. */
-    if (dlsym(RTLD_NEXT, "open") == NULL || dlsym(RTLD_NEXT, "uname") == NULL)
-        hwspoof_hooks_usable = 0;
+    /* Resolve every symbol the hooks will use, before any hook can run, and
+     * decide the verdict from the result. An unresolved REQUIRED symbol means
+     * the shim silently intercepts nothing, which is a different thing from
+     * "loaded" and must not be reported as such. */
+    for (i = 0; i < HWSHIM_SYMBOL_COUNT; i++) {
+        void *sym = dlsym(RTLD_NEXT, hwspoof_symbols[i].name);
+        *hwspoof_symbols[i].slot = sym;
+        if (!sym && !hwspoof_symbols[i].optional)
+            hwspoof_hooks_usable = 0;
+    }
 
     if (!p || !*p)
         return;
@@ -202,19 +298,26 @@ static int translate(const char *path, char *out, size_t outsz)
  *
  * Each hook below therefore falls back to issuing the underlying syscall
  * directly, which is precisely what libc did before we interposed on it. That
- * keeps a partially-resolving shim harmless. `hwspoof_hooks_usable` is cleared
- * on any resolution failure so the activation check in hardware-spoof.sh can
- * tell "loaded" apart from "actually functional" — the constructor probe alone
- * cannot make that distinction.
+ * keeps a partially-resolving shim harmless — the browser starts either way.
+ *
+ * The RESOLVE macro therefore has a single job left: detect that a hook's
+ * pointer is NULL and jump to the fallback. It no longer calls dlsym, because
+ * the constructor already resolved every symbol through the same
+ * `hwspoof_symbols` table the probe checks. Two consequences, both deliberate:
+ *
+ *   * The probe and the hooks can no longer disagree. Previously the hooks
+ *     resolved lazily and the probe dlsym'd two names separately, so a hook
+ *     could be dead while the probe still reported "loaded".
+ *   * Falling back no longer clears `hwspoof_hooks_usable`. That variable is a
+ *     load-time verdict, computed in the constructor before any hook runs;
+ *     a hook reaching its fallback afterwards does not retroactively change
+ *     what the probe file said, and pretending otherwise is what made the
+ *     earlier comment at this site wrong. The fallback is the *correct* and
+ *     expected behaviour on a partially-supporting libc.
  */
 #define RESOLVE(ret, name, args)                       \
-    static ret (*real_##name) args;                    \
     if (!real_##name)                                  \
-        real_##name = dlsym(RTLD_NEXT, #name);         \
-    if (!real_##name) {                                \
-        hwspoof_hooks_usable = 0;                      \
-        goto unresolved;                               \
-    }
+        goto unresolved;
 
 int open(const char *path, int flags, ...)
 {
@@ -269,21 +372,9 @@ static int openat_common(int dirfd, const char *path, int flags, mode_t mode,
         path = fake;
 
     if (is64) {
-        static int (*real_openat64)(int, const char *, int, ...);
-        if (!real_openat64) {
-            real_openat64 = dlsym(RTLD_NEXT, "openat64");
-            if (!real_openat64)
-                hwspoof_hooks_usable = 0;
-        }
         if (real_openat64)
             return real_openat64(dirfd, path, flags, mode);
     } else {
-        static int (*real_openat)(int, const char *, int, ...);
-        if (!real_openat) {
-            real_openat = dlsym(RTLD_NEXT, "openat");
-            if (!real_openat)
-                hwspoof_hooks_usable = 0;
-        }
         if (real_openat)
             return real_openat(dirfd, path, flags, mode);
     }
@@ -474,12 +565,6 @@ unresolved:
 
 void freeifaddrs(struct ifaddrs *ifa)
 {
-    static void (*real_freeifaddrs)(struct ifaddrs *);
-    if (!real_freeifaddrs) {
-        real_freeifaddrs = dlsym(RTLD_NEXT, "freeifaddrs");
-        if (!real_freeifaddrs)
-            hwspoof_hooks_usable = 0;
-    }
     if (real_freeifaddrs)
         real_freeifaddrs(ifa);
 }
