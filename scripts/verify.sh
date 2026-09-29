@@ -143,7 +143,6 @@ set -uo pipefail
 # --------------------------------------------------------------------------- #
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
-PROFILES_JSON="$REPO_ROOT/profiles.json"
 
 # Python interpreter, needed both for pytest and to ask the backend where
 # profile data lives. Resolved here, early, because the profile location below
@@ -167,6 +166,51 @@ PROFILES_DIR_RESOLVED_BY="backend/paths.py"
 if [[ -n "$PY_BIN" ]]; then
     CHROME_PROFILES_DIR="$(resolve_profiles_dir "$PY_BIN" 2>/dev/null)"
 fi
+
+# THE REGISTRY AND THE PROXY STORE — resolved the same way, for the same reason.
+#
+# These used to be written as `$REPO_ROOT/profiles.json` and
+# `$REPO_ROOT/proxies.json`, which quietly encodes an assumption that has been
+# true on exactly one kind of host: a machine where the git checkout IS the
+# install directory (~/.local/share/chrome-isolation-manager). Anywhere else —
+# a clone in ~/src, a CI runner, `git archive HEAD | tar -x -C $(mktemp -d)` —
+# those paths do not exist. The harness did not fail on that; it reported
+# confident results computed from files it had never opened. That is the single
+# worst failure mode available to a verification harness, and it is the reason
+# check 2 and its regression tests were green in a working tree and red from a
+# clean export.
+#
+# So they are ASKED FOR, and the answer is printed in the banner. If resolution
+# ever fails the fallback is empty rather than a guess: an empty path cannot be
+# mistaken for a measurement, whereas `$REPO_ROOT/profiles.json` always looks
+# like a perfectly good one.
+resolve_data_files() {
+    "$1" - "$REPO_ROOT" <<'PY_EOF'
+import os, sys
+sys.path.insert(0, os.path.join(sys.argv[1], 'backend'))
+try:
+    import paths
+    print(paths.registry_file())
+    print(paths.app_data_dir())
+except Exception as e:
+    sys.stderr.write("resolve failed: %s\n" % e)
+PY_EOF
+}
+REGISTRY_JSON=""
+APP_DATA_DIR=""
+DATA_FILES_RESOLVED_BY="backend/paths.py"
+if [[ -n "$PY_BIN" ]]; then
+    _resolved_data="$(resolve_data_files "$PY_BIN" 2>/dev/null)"
+    REGISTRY_JSON="$(printf '%s\n' "$_resolved_data" | sed -n 1p)"
+    APP_DATA_DIR="$(printf '%s\n' "$_resolved_data" | sed -n 2p)"
+fi
+if [[ "$REGISTRY_JSON" != /* ]]; then
+    REGISTRY_JSON=""
+    APP_DATA_DIR=""
+    DATA_FILES_RESOLVED_BY="UNRESOLVED — the app's own resolver could not be asked"
+fi
+PROXIES_JSON="$APP_DATA_DIR/proxies.json"
+HOST_SHARES_DIR="$APP_DATA_DIR/host-shares"
 # Only a real, absolute path counts as an answer. Anything else means we
 # failed to ask, and we must say so rather than substitute a guess that will
 # later be printed as though it had been measured.
@@ -213,7 +257,13 @@ D13_SNAP_POST_TESTS="$WORK/snapshot-01-post-tests.tsv"
 
 _snapshot_files() {
     local f d
-    for f in "$PROFILES_JSON" "$REPO_ROOT/proxies.json"; do
+    # The registry and the proxy store are hashed from the paths the APP
+    # resolved, not from the checkout directory. `$REPO_ROOT/profiles.json` is
+    # the same wrong assumption the check-2 probe used to make: it happens to
+    # be right only where the checkout IS the install directory, and anywhere
+    # else it snapshots a file that does not exist — i.e. it would have
+    # reported "nothing changed" while watching nothing at all.
+    for f in "$REGISTRY_JSON" "$PROXIES_JSON"; do
         if [[ -f "$f" ]]; then
             printf '%s\t%s\n' "$(sha256sum "$f" 2>/dev/null | cut -d' ' -f1)" "$f"
         else
@@ -233,12 +283,14 @@ _snapshot_files() {
             [[ -n "$f" ]] && printf 'DIRENT\t%s\n' "$f"
         done < <(find "$d" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort)
     done
-    # The host-share root: a probe that mkdirs here leaves a trace.
-    if [[ -d "$REPO_ROOT/host-shares" ]]; then
-        printf 'DIR\t%s\n' "$REPO_ROOT/host-shares"
+    # The host-share root: a probe that mkdirs here leaves a trace. Read from
+    # the app's resolver for the same reason — `$REPO_ROOT/host-shares` exists
+    # only when the checkout happens to be the install directory.
+    if [[ -d "$HOST_SHARES_DIR" ]]; then
+        printf 'DIR\t%s\n' "$HOST_SHARES_DIR"
         while IFS= read -r f; do
             [[ -n "$f" ]] && printf 'DIRENT\t%s\n' "$f"
-        done < <(find "$REPO_ROOT/host-shares" -mindepth 1 -maxdepth 1 2>/dev/null | sort)
+        done < <(find "$HOST_SHARES_DIR" -mindepth 1 -maxdepth 1 2>/dev/null | sort)
     fi
     # Generated desktop entries (refresh_desktop_entries() rewrites these).
     while IFS= read -r f; do
@@ -567,6 +619,17 @@ printf 'baseline  : %s (known: cpu="%s", mem=%s, dmi=%s, board="%s", kernel=%s)\
 # that must be visible in the output rather than discovered later.
 printf 'profiles  : %s%s%s\n' "$C_BOLD" "$CHROME_PROFILES_DIR" "$C_RESET"
 printf '            via %s%s%s\n' "$C_DIM" "$PROFILES_DIR_RESOLVED_BY" "$C_RESET"
+# Disclosed for the same reason. A check that reports a verdict about "the
+# profiles" without saying WHICH profile file it read is unauditable, and an
+# unreadable input that resolved to a non-empty-looking path is exactly how
+# this harness once produced confident results from nothing.
+printf 'registry  : %s%s%s\n' "$C_BOLD" "${REGISTRY_JSON:-<unresolved>}" "$C_RESET"
+printf '            via %s%s%s\n' "$C_DIM" "$DATA_FILES_RESOLVED_BY" "$C_RESET"
+if [[ -z "$REGISTRY_JSON" ]]; then
+    printf '            check 2 will SKIP: no registry path could be resolved\n'
+elif [[ ! -f "$REGISTRY_JSON" ]]; then
+    printf '            check 2 will SKIP: no registry file at that path\n'
+fi
 if [[ -d "$LEGACY_PROFILES_DIR" ]] && [[ -n "$(ls -A "$LEGACY_PROFILES_DIR" 2>/dev/null)" ]]; then
     printf '            legacy %s still holds data — the app would fall back to it if the\n' "$LEGACY_PROFILES_DIR"
     printf '            new store were empty. See scripts/migrate_profiles_dir.py\n' 
@@ -575,6 +638,18 @@ fi
 # =========================================================================== #
 # CHECK 1 — pytest tests/ is green
 # =========================================================================== #
+# NOTE: this includes tests/test_clean_checkout_is_green.py, which re-runs the
+# suite against a CLEAN EXPORT of the tracked tree. That is not redundant with
+# the run above it. This run measures the working tree; the gate measures what
+# somebody who clones this commit would get. The two have disagreed in this
+# project more than once — tests passed here and failed from `git archive HEAD`
+# because they read a git-ignored profiles.json that exists only in the
+# developer's checkout. A check that only ever looks at the working tree cannot
+# see that class of bug, because the working tree is the thing causing it.
+#
+# It roughly doubles this check's wall time. That is the price of the gate, and
+# it is why the gate runs the full suite rather than a subset: a subset that
+# skipped the slow files would leave exactly those files unprotected.
 _hd "1. pytest tests/ green"
 
 if [[ -z "$PY_BIN" ]]; then
@@ -611,9 +686,14 @@ _hd "2. no profile mounts ~ at /home/chrome/host"
 
 HOME_REAL="$(readlink -f "$HOME" 2>/dev/null || echo "$HOME")"
 VOL_REPORT=""
-VOL_RC=1
-if [[ -n "$PY_BIN" && -f "$PROFILES_JSON" ]]; then
-    _log "introspecting _build_volumes() for every profile in profiles.json (read-only; share dirs redirected to $WORK)"
+# The "could not evaluate" code, used as the default so that a probe which
+# never runs reports the same thing a probe that runs and finds no registry
+# does: no verdict. The old default of 1 was indistinguishable from "the code
+# has violations", which is how a probe that inspected nothing could be read as
+# a finding.
+VOL_RC=4
+if [[ -n "$PY_BIN" && -n "$REGISTRY_JSON" ]]; then
+    _log "introspecting _build_volumes() for every profile in $REGISTRY_JSON (read-only; share dirs redirected to $WORK)"
     # The scratch dir is EXPORTED on its own line, not written as
     #   VERIFY_SCRATCH="$WORK" VOL_REPORT="$(python ...)"
     # because bash does not make a pending assignment visible to the command
@@ -735,8 +815,43 @@ home = os.path.realpath(os.path.expanduser('~'))
 # CHROME_PROFILES_DIR is the *default* location only; it is NOT what an
 # un-migrated install would use.
 store = config.resolve_profiles_dir()
-with open(os.path.join(repo, 'profiles.json')) as f:
-    profiles = json.load(f)
+# WHERE THE REGISTRY IS READ FROM — and why it is not `repo/profiles.json`.
+#
+# An earlier version of this probe opened `<repo>/profiles.json`, on the
+# assumption that the checkout directory IS the app's data directory. That
+# assumption holds only where someone installed the app in place and then ran
+# the harness from the install directory. It is false everywhere else — in a
+# fresh clone, in CI, in `git archive HEAD | tar -x -C $(mktemp -d)` — and it
+# fails in the worst possible direction: not loudly, but by *silently
+# measuring nothing*. With no file at that path the probe raised
+# FileNotFoundError, exited 1, and the shell side read that 1 as "the code has
+# violations", so check 2 reported a confident FAIL (or, once the two tests
+# around it were counted, an apparently green run) about a registry that was
+# never opened.
+#
+# The registry location is therefore ASKED FOR, from the app's own resolver —
+# the same discipline the harness header applies to the profile store — rather
+# than assumed to be next to the source tree. `repo` is still passed in, and is
+# still used for what it is actually for: putting `backend/` on sys.path.
+_REGISTRY = getattr(registry, 'REGISTRY_FILE', '')
+if not _REGISTRY or not os.path.isfile(_REGISTRY):
+    print("PROBE_NO_REGISTRY\t%s" % (_REGISTRY or '<the app resolved no registry path>'))
+    sys.exit(4)
+try:
+    with open(_REGISTRY) as f:
+        profiles = json.load(f)
+except (OSError, ValueError) as _e:
+    # Distinct from "absent": the file is there and unreadable, which is a real
+    # fault worth reporting rather than a reason to fall back to a guess.
+    print("PROBE_BAD_REGISTRY\t%s\t%s" % (_REGISTRY, _e))
+    sys.exit(4)
+if not isinstance(profiles, dict):
+    print("PROBE_BAD_REGISTRY\t%s\tregistry is %s, expected an object"
+          % (_REGISTRY, type(profiles).__name__))
+    sys.exit(4)
+# Printed so the report says which registry produced the verdict below. A check
+# that does not name its input cannot be audited from its own output.
+print("PROBE_REGISTRY\t%s\t%d profile(s)" % (_REGISTRY, len(profiles)))
 
 bad = []
 _with_binds = []
@@ -817,11 +932,13 @@ D2_BINDS="$(printf '%s\n' "$VOL_REPORT" | sed -n 's/^PROFILE_HOST_BINDS\t//p' | 
 D2_NPROFILES="${D2_BINDS%%$'\t'*}"
 D2_NBINDS="${D2_BINDS#*$'\t'}"
 PROBE_PROBLEMS=()
-if [[ "${D2_LEAK_N:-1}" != "0" ]]; then
-    PROBE_PROBLEMS+=("the probe itself wrote into the user's host-shares root while introspecting the code: ${D2_LEAK_WHICH:-see output}. Redirect the LOCATION, not just the function name — _profile_host_mount() reaches ensure_host_share_dir through resolve_host_mount() in host_share's own namespace, so patching docker_manager.ensure_host_share_dir alone is not enough (patch host_share.HOST_SHARES_DIR to \$VERIFY_SCRATCH as well)")
-fi
-if [[ -n "$D2_NPROFILES" && "${D2_NBINDS:-0}" == "0" ]]; then
-    PROBE_PROBLEMS+=("the probe produced NO /home/chrome/host bind for any of the $D2_NPROFILES profile(s), so 'no profile mounts \$HOME' would be true for the wrong reason — a vacuous pass")
+if [[ $VOL_RC -eq 0 || $VOL_RC -eq 1 ]]; then
+    if [[ "${D2_LEAK_N:-1}" != "0" ]]; then
+        PROBE_PROBLEMS+=("the probe itself wrote into the user's host-shares root while introspecting the code: ${D2_LEAK_WHICH:-see output}. Redirect the LOCATION, not just the function name — _profile_host_mount() reaches ensure_host_share_dir through resolve_host_mount() in host_share's own namespace, so patching docker_manager.ensure_host_share_dir alone is not enough (patch host_share.HOST_SHARES_DIR to \$VERIFY_SCRATCH as well)")
+    fi
+    if [[ -n "$D2_NPROFILES" && "${D2_NBINDS:-0}" == "0" ]]; then
+        PROBE_PROBLEMS+=("the probe produced NO /home/chrome/host bind for any of the $D2_NPROFILES profile(s), so 'no profile mounts \$HOME' would be true for the wrong reason — a vacuous pass")
+    fi
 fi
 
 # Live cross-check: what do the existing containers actually bind?
@@ -851,6 +968,14 @@ elif [[ ${#PROBE_PROBLEMS[@]} -gt 0 ]]; then
     fail 2 "no profile mounts ~ at /home/chrome/host" \
           "THE PROBE IS NOT SIDE-EFFECT FREE OR NOT NON-VACUOUS: ${PROBE_PROBLEMS[*]} | $DETAIL" \
           "fix the probe before trusting this verdict"
+elif [[ "$VOL_RC" -eq 4 ]]; then
+    # Distinct from a violation: the probe never got as far as looking at any
+    # profile, so there is no verdict to report either way. Reported as its own
+    # status because a missing or unreadable registry is a fact about this host,
+    # not about the code — and it must never be laundered into a PASS.
+    skip 2 "no profile mounts ~ at /home/chrome/host" \
+         "the probe found no readable profile registry ($(printf '%s\n' "$VOL_REPORT" | grep -E '^PROBE_(NO|BAD)_REGISTRY' | tail -1)), so _build_volumes() was never introspected — no code verdict was produced either way | $DETAIL" \
+         "this is an install-state problem, not a code one: run the app once to create the registry, or point \$CHROME_ISOLATION_HOME at the install you meant to check"
 elif [[ "$VOL_RC" -eq 3 ]]; then
     skip 2 "no profile mounts ~ at /home/chrome/host" \
          "python 'docker' SDK not importable, so _build_volumes() could not be introspected | $DETAIL" \

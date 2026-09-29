@@ -29,7 +29,12 @@
  *      `failInFlightRequests`, or `bridgeGiveUp`. There is no path that leaves
  *      it unsettled while the app keeps running.
  *  I4. A `sent: false` request is settled by exactly one of: `flushQueue`
- *      (retry) or `bridgeGiveUp`. `failInFlightRequests` must never touch it.
+ *      (retry — including the flush `startBridge()` runs for a replacement
+ *      process) or `bridgeGiveUp`. `failInFlightRequests` must never touch it.
+ *      Note "eventually": an exhausted flush-retry budget with no replacement
+ *      already scheduled is handed to `bridgeGiveUp` by
+ *      `giveUpStrandedQueue()`, because waiting for a flush that nothing will
+ *      ever schedule is exactly the hang I4 forbids.
  */
 
 /** Backoff schedule — see the block comment in `main.js` for the rationale. */
@@ -42,7 +47,11 @@ const FLUSH_RETRY_MS = 50;
 /**
  * Upper bound on consecutive retries for one stranded queue: 50 * 20 = 1s of
  * polling. A bridge whose pipe is not up after that is not coming back soon, and
- * the restart / give-up path owns the queue from there.
+ * the retry budget being spent is what *transfers ownership* of the queue to the
+ * restart / give-up path — it is not a licence to leave the queue owed. See
+ * `giveUpStrandedQueue()`: the budget is per bridge process and is reset by
+ * `startBridge()`, so exhausting it always ends in `bridgeGiveUp`, never in a
+ * promise that nobody will ever settle.
  */
 const FLUSH_RETRY_MAX = 20;
 
@@ -154,6 +163,10 @@ function createBridgeQueue(deps) {
     const choice = await onGiveUp({
       info,
       maxFailures: BRIDGE_MAX_FAILURES,
+      // Not every give-up is a run of failed starts: a queue stranded on a pipe
+      // that never opened gives up after one. The UI needs this to avoid telling
+      // the user the bridge failed N times in a row when it did not.
+      consecutiveFailures: bridgeFailures,
       message,
     });
     if (choice === 'retry') {
@@ -225,22 +238,43 @@ function createBridgeQueue(deps) {
    * This re-arms itself while the queue is non-empty, which the previous
    * one-shot version did not: it fired once, found the pipe still dead, and
    * gave up — so a pipe that came up a moment later stranded the payload with
-   * no pending timer and no 'ready' event to wake it. Bounded by
-   * FLUSH_RETRY_MAX so a permanently dead bridge costs a bounded amount of
-   * polling rather than a timer for the life of the process; when the budget is
-   * spent the queue is left owed, and the restart/give-up path owns it from
-   * there. If the bridge dies in the meantime, 'error'/'exit' fire and the
-   * restart path takes over.
+   * no pending timer and no 'ready' event to wake it.
+   *
+   * The retrying is bounded by FLUSH_RETRY_MAX so a permanently dead bridge costs
+   * a bounded amount of polling rather than a timer for the life of the process.
+   * What happens when the budget runs out is the important part: the queue is
+   * handed to `giveUpStrandedQueue()`. It used to simply `return` there, on the
+   * assumption that the restart/give-up path would pick the queue up "from
+   * there" — but that assumption is false for a child that is still running with
+   * a dead stdin, because it emits no 'exit', so nothing ever reaches
+   * `handleBridgeLoss` and `bridgeGiveUp` never runs. The request was then owed
+   * to nobody: still queued, never settled, no timer left to pick it up, and the
+   * renderer waiting on a UI action that could never resolve. An exhausted
+   * budget is a *ownership transfer*, not an excuse to stop caring.
+   * The one thing that does outrank the budget is an already-scheduled restart.
+   * The first backoff (1s) and the whole retry budget (20 * 50ms) are the same
+   * length, so without this rule the two race: give up on a payload that a
+   * replacement bridge was one timer away from delivering. While `restartTimer`
+   * is pending, `handleBridgeLoss` owns the queue and `startBridge()` will flush
+   * it with a fresh budget, so the polling stops and the budget is not spent.
    */
   let flushRetries = 0;
   function scheduleFlushRetry() {
-    if (flushRetries >= FLUSH_RETRY_MAX) return;
     if (flushRetryTimer) return;
+    if (flushRetries >= FLUSH_RETRY_MAX) {
+      // A replacement is already on its way — it owns the queue, not the budget.
+      if (restartTimer) return;
+      giveUpStrandedQueue();
+      return;
+    }
     flushRetryTimer = timers.setTimeout(() => {
       flushRetryTimer = null;
       // The queue drained — nothing owed, so stop and let the next request
       // schedule a fresh retry if it needs one.
       if (!pendingQueue.length) { flushRetries = 0; return; }
+      // Same rule, one round earlier. `bridge` is null while a restart is
+      // pending, so a poll could not find a writable pipe anyway.
+      if (restartTimer) { flushRetries = 0; return; }
       flushRetries += 1;
       flushQueue(bridge);
       if (pendingQueue.length) scheduleFlushRetry();
@@ -249,8 +283,41 @@ function createBridgeQueue(deps) {
     if (flushRetryTimer && flushRetryTimer.unref) flushRetryTimer.unref();
   }
 
+  /**
+   * The retry budget is spent and a payload is still owed: stop pretending a
+   * flush is coming and settle the queue through the give-up path.
+   *
+   * `bridgeGiveUp()` rejects everything pending, queued or not, so invariant I4
+   * holds and nothing is left owed to a bridge that cannot accept it. The stuck
+   * child is killed first: it is the one case where give-up is reached while the
+   * process is still alive, and `bridgeGiveUp()` drops the reference to it, so
+   * skipping the kill would orphan a Python process for the life of the app.
+   *
+   * The reference is nulled *before* the kill so the child's 'exit' is
+   * recognised as belonging to a superseded process (`onLoss` compares against
+   * `bridge`) and does not also count as a restart failure.
+   */
+  function giveUpStrandedQueue() {
+    if (bridgeStopped) return;
+    const stuck = bridge;
+    bridge = null;
+    if (stuck) { try { stuck.kill(); } catch (_) { /* already dead */ } }
+    log('Bridge stdin never became writable; giving up on the stranded queue.');
+    // `bridgeGiveUp` is async (it awaits the user dialog). Swallow a rejection so
+    // a dialog that throws during teardown cannot become an unhandled rejection
+    // and take the app down — the pending requests are already settled by then.
+    bridgeGiveUp('its stdin never became writable')
+      .catch((err) => log('Bridge give-up failed:', err && err.message));
+  }
+
   function startBridge() {
     if (bridgeStopped) return;
+    // A new process gets a fresh retry budget. The old budget was spent polling
+    // the pipe of a process that no longer exists; carrying it over would let a
+    // single stranded queue exhaust the budget of every later bridge too, and
+    // (before this reset existed) there was no reset at all except a drain — so
+    // one bad second could cost the queue a give-up on the next healthy bridge.
+    flushRetries = 0;
     bridge = deps.spawnChild(cmd, args, { stdio: ['pipe', 'pipe', 'pipe'] });
     const child = bridge;
 
@@ -319,6 +386,11 @@ function createBridgeQueue(deps) {
     child.on('spawn', () => flushQueue(child));
     if (child.stdin.on) child.stdin.on('ready', () => flushQueue(child));
     flushQueue(child);
+    // If the pipe is still not up and something is owed, 'spawn'/'ready' are the
+    // only things that can wake it — and neither is guaranteed on a pipe that is
+    // already dead. Arm the retry so the invariant is structural: a non-empty
+    // queue always has either a pending timer or a live bridge event behind it.
+    if (pendingQueue.length) scheduleFlushRetry();
   }
 
   /** Send a request to the Python bridge and return a Promise. */
@@ -384,6 +456,7 @@ module.exports = {
   BRIDGE_MAX_FAILURES,
   BRIDGE_STABLE_MS,
   FLUSH_RETRY_MS,
+  FLUSH_RETRY_MAX,
   backoffDelay,
   createBridgeQueue,
 };

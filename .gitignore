@@ -70,3 +70,8 @@ tmp/
 /chromium-version-check.json
 # ...including the .tmp siblings an interrupted atomic write can leave behind
 /chromium-version-check.json.*.tmp
+
+# Migration backups and runtime state
+/profiles.json.bak-*
+/image-update-state.json
+/image-update.lock

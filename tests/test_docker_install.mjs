@@ -17,8 +17,20 @@
  *   1. NO `usermod` ever appears inside a `bash -c` / `sh -c` string.
  *   2. `readUsername()` refuses anything that is not a legal Unix username.
  *
- * Each test is negative-tested: `tests/mutation_check_docker_inject.sh` reverts
- * the fix in a scratch copy and confirms this file goes red.
+ * Each defence is negative-tested, not just asserted:
+ * `tests/mutation_check_docker_inject.sh` re-breaks the fix in a scratch copy
+ * and requires this file to go red — once with `usermod` interpolated into a
+ * `bash -c` string again (the R2 regression), once with `isValidUsername()`
+ * neutered. It also requires the control, the unmutated copy, to be green, so a
+ * red result cannot be an accident. The two mutations break disjoint sets of
+ * tests, which is what shows the defences are pinned independently rather than
+ * one of them covering for the other. Run by
+ * `tests/test_docker_install_js.py`, so `python3 -m pytest tests -q` includes
+ * it. Direct: `bash tests/mutation_check_docker_inject.sh`.
+ *
+ * (The positive tests below — "still does its job", the readUsername/display
+ * behaviour, the main.js wiring checks — are not individually mutation-tested;
+ * they exist to catch a regression, not to prove this suite non-vacuous.)
  */
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
