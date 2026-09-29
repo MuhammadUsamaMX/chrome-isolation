@@ -68,10 +68,27 @@ rm -f "$DESKTOP"
 rm -f "$ICON"
 
 for dir in "$PROFILES_DIR" "$LEGACY_PROFILES_DIR"; do
-  # Guard against a mis-resolved empty/root path turning this into `rm -rf /`.
-  if [[ -z "$dir" || "$dir" == "/" || ! -d "$dir" ]]; then
+  # A wrong CHROME_ISOLATION_HOME could otherwise resolve this to something
+  # like $HOME/profiles, and "is it a directory?" is not enough to make
+  # `rm -rf` that path safe. Require that it actually looks like our store:
+  # it is deep enough to be a profiles dir, and it is not the home directory
+  # or any ancestor of it.
+  case "$dir" in
+    ""|/|/*/..) continue ;;
+  esac
+  [[ -d "$dir" ]] || continue
+  [[ "$dir" == "$HOME_DIR" ]] && continue
+  # Refuse anything that contains the home directory, or sits directly in it
+  # without the expected leaf name.
+  case "$dir" in
+    "$HOME_DIR"/../*|../*) continue ;;
+  esac
+  if [[ "$(basename "$dir")" != "profiles" && "$(basename "$dir")" != "Chrome" ]]; then
+    echo "  refusing to remove $dir (unrecognised leaf name; not a profile store)" >&2
     continue
   fi
+  # Depth check: our stores are at least $HOME/<something>/profiles.
+  [[ "$dir" == */*/* ]] || continue
   echo "→ Removing profile data ($dir)..."
   rm -rf "$dir"
 done
