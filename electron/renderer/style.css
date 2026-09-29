@@ -522,10 +522,18 @@ body {
 }
 .modal h2 { font-size: 1.15rem; font-weight: 700; letter-spacing: -.01em; }
 .modal-sub { font-size: .84rem; color: var(--text2); }
-.modal label {
+/* A field is a .field wrapper (label / control / hint) rather than a <label>
+   wrapping its own control. A label may only contain phrasing content and
+   exactly one labelable control, so a <button> inside one was both invalid
+   HTML and ambiguous to activate. */
+.modal .field {
   display: flex;
   flex-direction: column;
   gap: .4rem;
+  font-size: .84rem;
+  font-weight: 600;
+}
+.modal label {
   font-size: .84rem;
   font-weight: 600;
 }

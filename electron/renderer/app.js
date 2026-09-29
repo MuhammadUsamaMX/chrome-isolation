@@ -237,14 +237,30 @@ async function handleAction(action, profile) {
 
 // ── Create modal ──────────────────────────────────────────────────────────────
 document.getElementById('btnCreate').addEventListener('click', () => {
-  populateProxySelect('inputProxySelect', '');
+  // Reopen shows whatever the user last typed. Escape/overlay dismissal
+  // deliberately does NOT clear the form, so opening it again must not either,
+  // or the "dismiss without losing work" behaviour would be a lie. The proxy
+  // option list is refreshed in case proxies were added since, but the current
+  // selection is carried across.
+  const sel = document.getElementById('inputProxySelect');
+  const kept = sel.value;
+  populateProxySelect('inputProxySelect', kept);
+  // populateProxySelect only restores a value that still exists as an option
+  // (saved proxies can be deleted while this form sits half-filled).
+  if (kept === '__custom__') {
+    document.getElementById('inputProxyCustom').style.display = '';
+  }
   document.getElementById('modalCreate').style.display = 'flex';
   document.getElementById('inputName').focus();
 });
 
+// The only dismissals that clear the form: a deliberate submit (handled in the
+// submit listener) and this explicitly-labelled Cancel button. Escape and
+// overlay clicks preserve the contents — see closeAllModals().
 document.getElementById('btnCreateCancel').addEventListener('click', () => {
   document.getElementById('modalCreate').style.display = 'none';
   document.getElementById('createForm').reset();
+  document.getElementById('inputProxyCustom').style.display = 'none';
 });
 
 // Proxy select -> reveal the custom URL input
@@ -275,7 +291,9 @@ document.getElementById('createForm').addEventListener('submit', async (e) => {
     await window.api.profiles.create(name, path, hostMount, proxy);
     toast(`Profile "${name}" created.`, 'success');
     document.getElementById('modalCreate').style.display = 'none';
+    // Submit is one of the two paths where clearing is unambiguous.
     document.getElementById('createForm').reset();
+    document.getElementById('inputProxyCustom').style.display = 'none';
     await loadProfiles();
   } catch (e) {
     toast(`Failed to create: ${e.message}`, 'error');
@@ -292,12 +310,13 @@ async function browseFolder(inputId) {
   }
 }
 
-// Bind folder picker to inputs (when clicked) and Browse buttons across the app
-['inputPath', 'inputHostMount', 'editHostMount'].forEach(id => {
-  const el = document.getElementById(id);
-  if (el) el.addEventListener('click', () => browseFolder(id));
-});
-
+// Folder picking is bound to the Browse BUTTONS only.
+//
+// It used to also be bound to a click on the input itself, back when those
+// inputs were `readonly` and could not receive a caret. Now that they are
+// editable, a click on the field is a normal text-edit click: it must place the
+// caret and select text, not launch a native dialog out from under the user.
+// Browse is the convenience; typing and pasting stay available.
 document.getElementById('btnBrowsePath')?.addEventListener('click', () => browseFolder('inputPath'));
 document.getElementById('btnBrowseCreate')?.addEventListener('click', () => browseFolder('inputHostMount'));
 document.getElementById('btnBrowseEdit')?.addEventListener('click', () => browseFolder('editHostMount'));
@@ -506,20 +525,30 @@ window.api.win.onMaximizeChange(isMax => {
 });
 
 // ── Keyboard & Overlay Modal Dismissal ─────────────────────────────────────
+// Escape and clicking the overlay dismiss a modal. Neither CLEARS it.
+//
+// This used to call form.reset() on the Create modal, so a single stray Escape
+// silently threw away a half-typed profile with no undo and no warning — the
+// keys most likely to be hit by accident. The form is now cleared only on a
+// successful submit and on the explicit Cancel button (both wired above).
+//
+// Note the overlays are NOT aria-modal and there is no focus trap, so Tab can
+// still leave an open dialog — which is exactly why the modal ARIA attributes
+// were removed rather than kept. See the R7 comment in index.html.
 function closeAllModals() {
   const modalIds = ['modalCreate', 'modalEdit', 'modalProxies', 'modalConfirm'];
   modalIds.forEach(id => {
     const m = document.getElementById(id);
     if (m && m.style.display !== 'none') {
       if (id === 'modalConfirm') {
+        // Cancel the confirmation rather than orphaning the promise: the
+        // confirm() promise must always settle, and its only two exits are
+        // these two buttons.
         const noBtn = document.getElementById('btnConfirmNo');
         if (noBtn) noBtn.click();
       } else {
         m.style.display = 'none';
-        if (id === 'modalCreate') {
-          const form = document.getElementById('createForm');
-          if (form) form.reset();
-        }
+        // Deliberately NOT form.reset() here — see the note above.
         if (id === 'modalEdit') editingName = null;
       }
     }

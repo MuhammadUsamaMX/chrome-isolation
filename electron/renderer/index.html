@@ -149,7 +149,8 @@
               <circle cx="11" cy="11" r="7"/>
               <line x1="21" y1="21" x2="16.5" y2="16.5"/>
             </svg>
-            <input type="text" id="inputSearch" placeholder="Search profiles…" autocomplete="off">
+            <input type="text" id="inputSearch" placeholder="Search profiles…"
+                   aria-label="Search profiles" autocomplete="off">
           </div>
           <button class="icon-btn" id="btnRefresh" title="Refresh" aria-label="Refresh profiles">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
@@ -230,45 +231,68 @@
     </main>
   </div>
 
-  <!-- Create modal -->
-  <div class="modal-overlay" id="modalCreate" role="dialog" aria-modal="true" aria-labelledby="createTitle" style="display:none;">
+  <!-- Create modal
+
+       R7: this overlay deliberately carries NO role="dialog" / aria-modal /
+       aria-labelledby. The renderer has no focus trap, does not move focus into
+       the dialog and does not restore it on close, so the modal ARIA contract
+       would be a promise the app does not keep — and aria-modal in particular
+       tells assistive tech the background is inert when a Tab key walks straight
+       out of here into the profile cards behind. That is a false accessibility
+       claim, which is worse than no claim. aria-modal / role="dialog" may only
+       come back together with a real focus trap; see
+       tests/test_renderer_a11y_regressions.py.
+
+       Each field is a .field wrapper holding a <label for=...> that names
+       exactly ONE control. A <label> must not wrap a <button>: nesting one
+       inside another label is invalid HTML and gives the click two possible
+       meanings (activate the label's control, or press the button). -->
+  <div class="modal-overlay" id="modalCreate" style="display:none;">
     <div class="modal">
       <h2 id="createTitle">New Profile</h2>
       <p class="modal-sub">Set up a new isolated browser profile</p>
       <form id="createForm">
-        <label>Profile Name
+        <div class="field">
+          <label for="inputName">Profile Name</label>
           <input type="text" id="inputName" placeholder="e.g. Work, Fiverr, Personal"
                  pattern="[a-zA-Z0-9_-]+" maxlength="64" required autocomplete="off">
           <small>Letters, numbers, dash and underscore only.</small>
-        </label>
-        <label>Custom Location <span class="opt">(optional)</span>
+        </div>
+        <div class="field">
+          <label for="inputPath">Custom Location <span class="opt">(optional)</span></label>
           <div class="input-row">
+            <!-- Editable on purpose: typing and pasting a path is real
+                 functionality. Browse is a convenience, not the only route.
+                 Do not add readonly here; it was a regression. -->
             <input type="text" id="inputPath" placeholder="Leave empty for the default isolated location"
-                   readonly style="cursor: pointer;" autocomplete="off">
+                   autocomplete="off">
             <button type="button" class="btn btn-secondary btn-sm" id="btnBrowsePath">Browse…</button>
             <button type="button" class="btn btn-secondary btn-sm" id="btnClearPath" title="Clear custom location" aria-label="Clear custom location">✕</button>
           </div>
-        </label>
-        <label>Host Folder <span class="opt">(read-only, optional)</span>
+          <small>Type or paste a path, or use Browse to pick a folder.</small>
+        </div>
+        <div class="field">
+          <label for="inputHostMount">Host Folder <span class="opt">(read-only, optional)</span></label>
           <div class="input-row">
             <input type="text" id="inputHostMount" placeholder="Leave empty for a private, empty share folder"
-                   readonly style="cursor: pointer;" autocomplete="off">
+                   autocomplete="off">
             <button type="button" class="btn btn-secondary btn-sm" id="btnBrowseCreate">Browse…</button>
             <button type="button" class="btn btn-secondary btn-sm" id="btnClearCreate" title="Clear host folder" aria-label="Clear host folder">✕</button>
           </div>
-          <small>Mounted read-only at <code>/home/chrome/host</code> inside the container. <strong>Your home directory is never mounted.</strong>
+          <small>Type or paste a path, or use Browse to pick a folder. Mounted read-only at <code>/home/chrome/host</code> inside the container. <strong>Your home directory is never mounted.</strong>
           If you leave this empty, the container gets a private, empty folder just for this profile — nothing from your home is shared.
           Pick a specific folder to share just those files.</small>
-        </label>
-        <label>Proxy <span class="opt">(optional)</span>
+        </div>
+        <div class="field">
+          <label for="inputProxySelect">Proxy <span class="opt">(optional)</span></label>
           <select id="inputProxySelect" class="modal-select">
             <option value="">None</option>
             <option value="__custom__">Custom…</option>
           </select>
           <input type="text" id="inputProxyCustom" placeholder="socks5://user:pass@host:port"
-                 style="display:none" autocomplete="off">
+                 aria-label="Custom proxy URL" style="display:none" autocomplete="off">
           <small>Pick a saved proxy or choose Custom to enter one.</small>
-        </label>
+        </div>
         <div class="modal-actions">
           <button type="button" class="btn btn-secondary" id="btnCreateCancel">Cancel</button>
           <button type="submit" class="btn btn-primary">Create</button>
@@ -277,33 +301,36 @@
     </div>
   </div>
 
-  <!-- Edit modal -->
-  <div class="modal-overlay" id="modalEdit" role="dialog" aria-modal="true" aria-labelledby="editTitle" style="display:none;">
+  <!-- Edit modal — see the R7 note on the Create modal above. -->
+  <div class="modal-overlay" id="modalEdit" style="display:none;">
     <div class="modal">
       <h2 id="editTitle">Edit Profile</h2>
       <p class="modal-sub">Update the read-only host folder and proxy. Your home directory is never mounted.</p>
       <form id="editForm">
-        <label>Host Folder <span class="opt">(read-only, optional)</span>
+        <div class="field">
+          <label for="editHostMount">Host Folder <span class="opt">(read-only, optional)</span></label>
           <div class="input-row">
             <input type="text" id="editHostMount" placeholder="Leave empty for a private, empty share folder"
-                   readonly style="cursor: pointer;" autocomplete="off">
+                   autocomplete="off">
             <button type="button" class="btn btn-secondary btn-sm" id="btnBrowseEdit">Browse…</button>
             <button type="button" class="btn btn-secondary btn-sm" id="btnClearEdit" title="Clear host folder" aria-label="Clear host folder">✕</button>
           </div>
-          <small>Mounted read-only at <code>/home/chrome/host</code> inside the container. <strong>Your home directory is never mounted.</strong>
+          <small>Type or paste a path, or use Browse to pick a folder. Mounted read-only at <code>/home/chrome/host</code> inside the container. <strong>Your home directory is never mounted.</strong>
           If you leave this empty, the container gets a private, empty folder just for this profile — nothing from your home is shared.
           Pick a specific folder to share just those files.</small>
-        </label>
-        <label>Proxy <span class="opt">(optional)</span>
+        </div>
+        <div class="field">
+          <label for="editProxySelect">Proxy <span class="opt">(optional)</span></label>
           <select id="editProxySelect" class="modal-select">
             <option value="">None</option>
             <option value="__custom__">Custom…</option>
           </select>
           <input type="text" id="editProxyCustom" placeholder="socks5://user:pass@host:port"
-                 style="display:none" autocomplete="off">
+                 aria-label="Custom proxy URL" style="display:none" autocomplete="off">
           <small>Pick a saved proxy or choose Custom to enter one.</small>
-        </label>
-        <label>Timezone <span class="opt">(optional)</span>
+        </div>
+        <div class="field">
+          <label for="editTimezone">Timezone <span class="opt">(optional)</span></label>
           <input type="text" id="editTimezone" list="tzList"
                  placeholder="e.g. Asia/Karachi" autocomplete="off">
           <datalist id="tzList">
@@ -327,7 +354,7 @@
             <option value="Pacific/Auckland"></option>
           </datalist>
           <small>IANA timezone for this profile's machine identity.</small>
-        </label>
+        </div>
         <div class="modal-actions">
           <button type="button" class="btn btn-secondary" id="btnEditCancel">Cancel</button>
           <button type="submit" class="btn btn-primary">Save</button>
@@ -336,17 +363,17 @@
     </div>
   </div>
 
-  <!-- Manage Proxies modal -->
-  <div class="modal-overlay" id="modalProxies" role="dialog" aria-modal="true" aria-labelledby="proxiesTitle" style="display:none;">
+  <!-- Manage Proxies modal — no modal ARIA, see the R7 note on the Create modal. -->
+  <div class="modal-overlay" id="modalProxies" style="display:none;">
     <div class="modal modal-wide">
       <h2 id="proxiesTitle">Proxies</h2>
       <p class="modal-sub">Shared proxies available to every profile.</p>
       <div id="proxyList" class="proxy-list"></div>
       <form id="proxyForm" class="proxy-form">
         <input type="text" id="proxyName" placeholder="Name (e.g. tunnel-alan1)"
-               autocomplete="off">
+               aria-label="Proxy name" autocomplete="off">
         <input type="text" id="proxyUrl" placeholder="socks5://127.0.0.1:10080"
-               autocomplete="off">
+               aria-label="Proxy URL" autocomplete="off">
         <button type="submit" class="btn btn-primary btn-sm">Add</button>
       </form>
       <div class="modal-actions">
@@ -355,8 +382,10 @@
     </div>
   </div>
 
-  <!-- Confirm modal -->
-  <div class="modal-overlay" id="modalConfirm" role="dialog" aria-modal="true" aria-labelledby="confirmTitle" style="display:none;">
+  <!-- Confirm modal — no modal ARIA, see the R7 note on the Create modal.
+       The Yes/No buttons are the accessible name of this dialog, which is why
+       removing aria-labelledby costs nothing here. -->
+  <div class="modal-overlay" id="modalConfirm" style="display:none;">
     <div class="modal">
       <h2 id="confirmTitle">Confirm</h2>
       <p id="confirmMsg"></p>
