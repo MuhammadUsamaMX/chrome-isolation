@@ -44,6 +44,7 @@ npm-debug.log*
 
 # App runtime data (user profiles — never commit real data)
 Chrome/
+Isolated-Chrome/
 
 # Secrets / cookies
 *.cookie
@@ -65,3 +66,7 @@ tmp/
 /proxies.json
 /.empty
 /icon.png
+# Chromium auto-update runtime state (written by backend/chromium_version.py)
+/chromium-version-check.json
+# ...including the .tmp siblings an interrupted atomic write can leave behind
+/chromium-version-check.json.*.tmp

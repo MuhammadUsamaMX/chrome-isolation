@@ -18,7 +18,9 @@ import sys
 import time
 from typing import Optional
 
-from config import REGISTRY_FILE, CHROME_PROFILES_DIR, HOST_SHARES_DIR
+import paths
+from config import (REGISTRY_FILE, CHROME_PROFILES_DIR, CHROME_PROFILES_DIR_LEGACY,
+                    HOST_SHARES_DIR)
 from validator import validate_profile_name, safe_profile_path
 
 # Profiles found with an empty host_mount on the most recent load, plus the
@@ -55,6 +57,15 @@ def _audit_default_host_mounts(data: dict) -> None:
 def default_host_mount_profiles() -> list:
     """Names of profiles currently relying on the safe default share dir."""
     return sorted(_default_host_mount_profiles)
+
+
+def _active_profiles_dir() -> str:
+    """
+    The profile store in use, read from THIS module's globals so that a caller
+    (or a test) which rebinds registry.CHROME_PROFILES_DIR / _LEGACY gets the
+    same resolution the constants would give.
+    """
+    return paths.resolve_profiles_dir(CHROME_PROFILES_DIR, CHROME_PROFILES_DIR_LEGACY)
 
 
 def _load() -> dict:
@@ -138,10 +149,14 @@ def resolve_profile_path(name: str) -> str:
     Return the canonical path for a profile.
     First checks the registry (handles custom locations correctly).
     Falls back to the default managed path if not yet registered.
+
+    The fallback follows the *resolved* store, so an install that has not been
+    migrated yet keeps resolving into ~/Chrome instead of pointing at a
+    ~/Isolated-Chrome/profiles directory that does not exist.
     """
     name = validate_profile_name(name)
     entry = _load().get(name)
     if entry:
         return entry["path"]
     # Not in registry yet — use default path (but do NOT create it here)
-    return safe_profile_path(name, CHROME_PROFILES_DIR)
+    return safe_profile_path(name, _active_profiles_dir())

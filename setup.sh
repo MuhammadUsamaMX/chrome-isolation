@@ -289,23 +289,32 @@ LAUNCHER
 
   cp "$SRC/assets/icons/icon.png" "$ICON_DIR/chrome-isolation.png"
 
+  # Profile MANAGER, not a browser: no `WebBrowser` category, no `%u` in Exec,
+  # and no MimeType= / x-scheme-handler/ key — so it can never show up in a
+  # default-browser chooser or claim a URL association. (The per-profile
+  # launchers from backend/desktop_manager.py use `Network;Utility;`.)
   cat > "$DESKTOP_DIR/chrome-isolation.desktop" <<DESKTOP
 [Desktop Entry]
+Version=1.0
 Type=Application
 Name=Chrome Isolation Manager
-GenericName=Browser Profile Manager
-Comment=Manage isolated Chrome browser profiles in Docker containers
-Exec=$BIN_DIR/chrome-isolation %u
+GenericName=Isolated Profile Manager
+Comment=Manage isolated Chrome profiles in Docker containers
+Exec=$BIN_DIR/chrome-isolation
 Icon=chrome-isolation
 Terminal=false
-Categories=Network;WebBrowser;Utility;
+Categories=Utility;
+Keywords=isolation;container;docker;profile;
 StartupNotify=true
 StartupWMClass=chrome-isolation
+X-Chrome-Isolation-Managed=true
 DESKTOP
 
   gtk-update-icon-cache -q -t -f "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
+  # Scoped to the one directory we wrote into. `xdg-desktop-menu forceupdate`
+  # is deliberately NOT run: it rewrites the user's whole menu layout and
+  # caches far beyond this directory, for no benefit.
   update-desktop-database "$DESKTOP_DIR" 2>/dev/null || true
-  xdg-desktop-menu forceupdate 2>/dev/null || true
   success "AppImage installed. Launch: chrome-isolation"
   exit 0
 fi

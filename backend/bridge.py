@@ -24,6 +24,9 @@ import image_update
 
 _METHODS = {
     "list_profiles":   lambda p: svc.get_all_profiles(),
+    # Re-derive our .desktop entries. Idempotent and cheap; run at startup so
+    # entries written by older builds self-heal.
+    "refresh_desktop_entries": lambda p: svc.refresh_desktop_entries(),
     "create_profile":  lambda p: svc.create_profile(p["name"], p.get("custom_path", ""), p.get("host_mount", ""), p.get("proxy", "")),
     "update_profile":  lambda p: svc.update_profile(p["name"], p.get("host_mount"), p.get("proxy"), p.get("timezone")),
     "delete_profile":  lambda p: svc.delete_profile(p["name"]),

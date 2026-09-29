@@ -75,7 +75,30 @@ set -uo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 PROFILES_JSON="$REPO_ROOT/profiles.json"
-CHROME_PROFILES_DIR="${HOME}/Chrome"
+
+# Python interpreter, needed both for pytest and to ask config.py where profile
+# data lives. Resolved here, early, because the profile location below needs it.
+PY_BIN=""
+for cand in python3 python; do command -v "$cand" >/dev/null 2>&1 && { PY_BIN="$cand"; break; }; done
+
+# Profile data location. NEVER hardcoded — ask the app's own config, which
+# honours $CHROME_ISOLATION_HOME and falls back to the legacy ~/Chrome for
+# installs that have not been migrated yet. See backend/paths.py.
+resolve_profiles_dir() {
+    "$1" -c '
+import os, sys
+sys.path.insert(0, os.path.join(os.getcwd(), "backend"))
+import config
+print(config.resolve_profiles_dir())
+' 2>/dev/null
+}
+if [[ -n "${PY_BIN:-}" ]]; then
+    CHROME_PROFILES_DIR="$(resolve_profiles_dir "$PY_BIN")"
+fi
+if [[ -z "${CHROME_PROFILES_DIR:-}" ]]; then
+    # No Python available to ask; fall back to the documented default.
+    CHROME_PROFILES_DIR="${CHROME_ISOLATION_HOME:-$HOME/Isolated-Chrome}/profiles"
+fi
 
 VERBOSE=0
 CHROMIUM_MAX_AGE_MONTHS="${VERIFY_CHROMIUM_MAX_AGE_MONTHS:-12}"
@@ -373,8 +396,6 @@ printf 'baseline  : %s (known: cpu="%s", mem=%s, dmi=%s, board="%s", kernel=%s)\
 # CHECK 1 — pytest tests/ is green
 # =========================================================================== #
 _hd "1. pytest tests/ green"
-PY_BIN=""
-for cand in python3 python; do command -v "$cand" >/dev/null 2>&1 && { PY_BIN="$cand"; break; }; done
 
 if [[ -z "$PY_BIN" ]]; then
     skip 1 "pytest tests/ green" "no python interpreter on PATH" "install python3 + pytest"

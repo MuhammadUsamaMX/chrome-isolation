@@ -12,9 +12,19 @@ import tempfile
 import zipfile
 from pathlib import PurePosixPath
 
-from config import CHROME_PROFILES_DIR
+import paths
+from config import CHROME_PROFILES_DIR, CHROME_PROFILES_DIR_LEGACY
 from validator import validate_profile_name
 from registry import register_profile, resolve_profile_path
+
+def active_profiles_dir() -> str:
+    """
+    The profile store in use, resolved from THIS module's globals so a caller
+    (or test) that rebinds archive.CHROME_PROFILES_DIR gets consistent
+    behaviour.
+    """
+    return paths.resolve_profiles_dir(CHROME_PROFILES_DIR, CHROME_PROFILES_DIR_LEGACY)
+
 
 _NAME_RE = re.compile(r'^[a-zA-Z0-9_-]{1,64}$')
 _EXCLUDE_DIRS = {'Cache', 'Code Cache', 'GPUCache', 'ShaderCache', 'GrShaderCache'}
@@ -62,7 +72,11 @@ def import_profile(archive_path: str) -> dict:
             raise ValueError(f"Expected one profile directory, found: {dirs}")
 
         profile_name = validate_profile_name(dirs[0])
-        dest = os.path.join(CHROME_PROFILES_DIR, profile_name)
+        # The store actually in use, so an un-migrated install imports into
+        # ~/Chrome alongside its existing profiles instead of scattering them.
+        store = active_profiles_dir()
+        os.makedirs(store, exist_ok=True)
+        dest = os.path.join(store, profile_name)
 
         if os.path.exists(dest):
             raise ValueError(f"Profile '{profile_name}' already exists.")
