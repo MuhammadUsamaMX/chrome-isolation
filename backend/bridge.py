@@ -21,6 +21,10 @@ import profile_service as svc
 import proxy_store
 import image_update
 
+#: Set once the version detector has been handed to `image_update`. Guards the
+#: lazy import in `_ensure_version_detector`; not a correctness flag.
+_detector_registered = False
+
 
 _METHODS = {
     "list_profiles":   lambda p: svc.get_all_profiles(),
@@ -53,12 +57,41 @@ _METHODS = {
     #
     # `image_update_status` is a cheap in-memory read for the UI to poll.
     # None of the three touches Docker on the request path.
-    "image_update_check":  lambda p: image_update.check_and_start(
+    "image_update_check":  lambda p: _ensure_version_detector() or image_update.check_and_start(
         reason=p.get("reason", "manual")),
     "image_update_apply":  lambda p: image_update.apply_update(
         version=p.get("version"), reason="user_consent"),
     "image_update_status": lambda p: image_update.get_update_status(),
 }
+
+
+def _ensure_version_detector():
+    """
+    Install the Chromium version detector into `image_update` on first use.
+
+    Without this, `image_update` has no detector, its default is fail-closed,
+    and every check reports "update availability unknown" -- so the app can
+    never discover an update and the feature silently does nothing. The
+    detector module is self-registering via the
+    CHROME_ISOLATION_VERSION_DETECTOR env var, but nothing in the shipped
+    launcher sets that variable, so the default installation had no detector at
+    all.
+
+    Deliberately lazy: importing `chromium_version` at module scope would put
+    it on the backend's import path, and the brief for that module is explicit
+    that no network or heavy work happens at import. Doing it on the first
+    update call keeps startup untouched. Idempotent and never raises -- a
+    failure here must degrade to "cannot check", not to a broken bridge.
+    """
+    global _detector_registered
+    if _detector_registered:
+        return
+    _detector_registered = True
+    try:
+        import chromium_version
+        chromium_version.register_detector(image_update)
+    except Exception as exc:  # pragma: no cover - defensive
+        print(f"[bridge] version detector unavailable: {exc}", file=sys.stderr)
 
 
 def _handle(req: dict) -> dict:

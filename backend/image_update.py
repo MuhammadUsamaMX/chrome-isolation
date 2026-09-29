@@ -1116,7 +1116,8 @@ class ImageUpdater:
                     next_attempt_at=started + self._min_interval,
                 )
                 return
-            if latest is not None and current is not None and latest == current and not force:
+            if not force and _is_up_to_date(current, latest,
+                                             self._last_detection):
                 _log(f"up to date (Chromium {current})")
                 self._write_state(
                     state="up_to_date", finished_at=self._now(),
@@ -1416,8 +1417,74 @@ class ImageUpdater:
         return detected_current or current, latest, branch_eol
 
 
+def _version_tuple(value) -> Optional[Tuple[int, ...]]:
+    """
+    Sortable key for a Chromium version, or None if unparsable.
+
+    Two traps this exists to avoid:
+
+      * LEXICAL. '99.0.1.2' > '152.0.7977.82' as strings but is older, and the
+        predecessor image really was 124 vs 152.
+      * Alpine's package revision. The index publishes
+        '152.0.7977.82-r0' while the image's own manifest and
+        `chromium-browser --version` report '152.0.7977.82'. Comparing the raw
+        strings therefore reports an update available for a browser that is
+        already exactly current — which is how an installed-124 image on an
+        EOL branch asks to be "updated" to 124 again, forever.
+
+    Mirrors chromium_version.version_key. Duplicated deliberately rather than
+    imported: this module must not depend on the detector, because the detector
+    is optional and injected at runtime. If both are present they agree, and
+    the detector's own tri-state verdict is preferred below.
+    """
+    if not isinstance(value, str):
+        return None
+    text = value.strip().split("-", 1)[0]      # drop the -rN package revision
+    if not text:
+        return None
+    parts = []
+    for chunk in text.split("."):
+        if not chunk.isdigit():
+            return None
+        parts.append(int(chunk))
+    return tuple(parts) if parts else None
+
+
+def _is_up_to_date(current, latest, detection=None) -> bool:
+    """
+    True only when the image is positively known to be current.
+
+    Prefers the detector's own tri-state verdict when it supplied one: the
+    detector is the component that knows how to compare a published index
+    version against an installed one, and discarding its answer in favour of a
+    local string comparison is what produced a false "update available" for an
+    image already at 124.0.6367.78 against an index of 124.0.6367.78-r0.
+
+    Falls back to a normalised numeric comparison, and returns False when
+    either side is unparsable — "cannot tell" must never read as "up to date",
+    because that is the direction that hides a real update.
+    """
+    if isinstance(detection, dict) and "update_available" in detection:
+        verdict = detection.get("update_available")
+        if verdict is False:
+            return True
+        if verdict is True:
+            return False
+        # verdict is None -> undetermined; fall through to the local compare
+        # rather than guessing, and a failed local compare also yields False.
+    cur_key = _version_tuple(current)
+    new_key = _version_tuple(latest)
+    if cur_key is None or new_key is None:
+        return False
+    width = max(len(cur_key), len(new_key))
+    cur = cur_key + (0,) * (width - len(cur_key))
+    new = new_key + (0,) * (width - len(new_key))
+    # new < cur means the image is AHEAD of the published index (a branch whose
+    # release has not propagated to the mirror). That is not an update either.
+    return new <= cur
+
+
 def _default_run_cmd(cmd, env=None, timeout=None):
-    """Thin subprocess wrapper. Returns (returncode, stdout, stderr)."""
     try:
         result = subprocess.run(
             cmd, env=env, capture_output=True, text=True, timeout=timeout
