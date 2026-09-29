@@ -52,6 +52,14 @@ const TUNABLES = [
  *          losing the user's unsent action.
  *   flush— flushQueue() no longer gates on stdin.writable, so it writes to a
  *          dead pipe on a spawn failure. Guards the reachability claim.
+ *   budget— the M1 regression: spending the flush-retry budget silently stops
+ *          the retrying, and the budget is not reset per process. A payload
+ *          queued on a pipe that never opens is then owed to nobody — the exact
+ *          hang the module exists to prevent.
+ *   norestart— the give-up runs even though a replacement bridge is already
+ *          scheduled, so it rejects a payload the restart was one timer from
+ *          delivering. The inverse error, and a real race: the first backoff and
+ *          the whole budget are both 1s.
  */
 const MUTATIONS = {
   bug: [[
@@ -82,6 +90,39 @@ const MUTATIONS = {
     `    if (!child || !child.stdin || !child.stdin.writable) return;`,
     `    if (!child || !child.stdin) return;`,
   ]],
+  budget: [
+    [
+      `    if (flushRetries >= FLUSH_RETRY_MAX) {
+      // A replacement is already on its way — it owns the queue, not the budget.
+      if (restartTimer) return;
+      giveUpStrandedQueue();
+      return;
+    }`,
+      `    if (flushRetries >= FLUSH_RETRY_MAX) return;`,
+    ],
+    [
+      `    flushRetries = 0;
+    bridge = deps.spawnChild(cmd, args, { stdio: ['pipe', 'pipe', 'pipe'] });`,
+      `    bridge = deps.spawnChild(cmd, args, { stdio: ['pipe', 'pipe', 'pipe'] });`,
+    ],
+  ],
+  // Give-up fires even though a replacement bridge is already scheduled, so a
+  // payload the restart was about to deliver is rejected instead.
+  norestart: [
+    [
+      `      // A replacement is already on its way — it owns the queue, not the budget.
+      if (restartTimer) return;
+      giveUpStrandedQueue();`,
+      `      giveUpStrandedQueue();`,
+    ],
+    [
+      `      // Same rule, one round earlier. \`bridge\` is null while a restart is
+      // pending, so a poll could not find a writable pipe anyway.
+      if (restartTimer) { flushRetries = 0; return; }
+`,
+      ``,
+    ],
+  ],
 };
 
 /**
@@ -200,6 +241,52 @@ const tick = (n = 4) => new Promise((r) => {
 });
 
 /**
+ * A clock the test drives by hand, injected through `deps.timers`.
+ *
+ * The flush-retry budget is a *counter*, not a wall-clock deadline, so the tests
+ * that pin it have to be able to run "exactly one retry round" at a time rather
+ * than sleeping and hoping which side of the budget they land on. Timers are
+ * objects carrying an `unref`, matching what bridge_queue.js pokes at.
+ *
+ * Real microtasks still drain between firings (`tick`), because the give-up path
+ * is async: the requests it rejects settle on the microtask queue, not inline.
+ */
+function manualClock() {
+  let now = 0;
+  let seq = 0;
+  const jobs = new Map();
+  const timers = {
+    setTimeout: (fn, ms) => {
+      const id = ++seq;
+      jobs.set(id, { fn, at: now + (ms || 0) });
+      return { id, unref() {} };
+    },
+    clearTimeout: (t) => { if (t) jobs.delete(t.id); },
+  };
+  /** Fire everything due within `ms`, earliest deadline first. */
+  async function advance(ms) {
+    const until = now + ms;
+    for (;;) {
+      let next = null;
+      for (const [id, job] of jobs) {
+        if (job.at > until) continue;
+        if (!next || job.at < next.job.at || (job.at === next.job.at && id < next.id)) {
+          next = { id, job };
+        }
+      }
+      if (!next) break;
+      jobs.delete(next.id);
+      now = next.job.at;
+      next.job.fn();
+      await tick(2);
+    }
+    now = until;
+    await tick(2);
+  }
+  return { timers, advance, pending: () => jobs.size, now: () => now };
+}
+
+/**
  * Which module the *current run* is exercising. Tests call `loadModule()` with
  * no argument, so one test body can be replayed against the real source and
  * against every reintroduced bug.
@@ -209,12 +296,18 @@ let ACTIVE_MUTATION;
 /** Build a queue wired to fakes, using the module under test. */
 function loadQueue(overrides = {}) {
   const mod = loadModule(ACTIVE_MUTATION);
-  const state = { children: [], gives: [], quits: 0, notifications: [], spawnDead: false };
+  // `spawnDead` = spawn failure (dead stdin *and* an 'error' event, so the
+  // restart path owns the queue). `deadStdin` = the process starts and stays
+  // alive but its stdin is never writable (no 'error', no 'exit' unless we fire
+  // one). The second is the M1 window: nothing will ever signal it.
+  const state = {
+    children: [], gives: [], quits: 0, notifications: [], spawnDead: false, deadStdin: false,
+  };
   const q = mod.createBridgeQueue({
     cmd: 'bridge',
     args: [],
     spawnChild: () => {
-      const c = new FakeChild(state.spawnDead);
+      const c = new FakeChild(state.spawnDead || state.deadStdin);
       state.children.push(c);
       // A real spawn failure surfaces asynchronously via 'error'.
       if (state.spawnDead) setTimeout(() => c.failSpawn(), 0);
@@ -448,6 +541,8 @@ test('(g) backoff gives up after MAX_FAILURES and rejects the queue', async () =
   assert.equal(q.pendingCount(), 0);
   assert.equal(q.isStopped(), true);
   assert.equal(state.gives.length, 1, 'give-up must be reached exactly once');
+  // This one really is a run of failed starts, and the dialog says so.
+  assert.equal(state.gives[0].consecutiveFailures, mod.BRIDGE_MAX_FAILURES);
 });
 
 test('(h) give-up "Retry" restarts the bridge and accepts new work', async () => {
@@ -521,6 +616,12 @@ test('(j) backoff schedule: exponential and capped, per the shipped constants', 
   assert.equal(num('BRIDGE_BACKOFF_MAX_MS'), 30000);
   assert.equal(num('BRIDGE_MAX_FAILURES'), 5);
   assert.equal(num('BRIDGE_STABLE_MS'), 10000);
+  // The flush-retry budget, likewise read from the shipped file: 1s of polling,
+  // after which the queue is handed to the give-up path (never left owed).
+  assert.equal(num('FLUSH_RETRY_MS'), 50);
+  assert.equal(num('FLUSH_RETRY_MAX'), 20);
+  assert.ok(num('FLUSH_RETRY_MS') * num('FLUSH_RETRY_MAX') <= 5000,
+    'the stranded queue must reach a settlement path within seconds');
   const base = 1000, max = 30000;
   assert.deepEqual(
     [1, 2, 3, 4].map((n) => Math.min(base * 2 ** (n - 1), max)),
@@ -593,35 +694,199 @@ test('(m) the flush retry keeps re-arming until the pipe comes up', async () => 
   assert.equal(r.ok, true);
 });
 
-test('(m2) the flush retry is bounded, not an unbounded poll', async () => {
-  // A permanently dead bridge must not cost a timer for the life of the
-  // process. The retry budget runs out, the queue is left owed, and the
-  // restart / give-up path takes ownership from there.
+test('(m2) a payload on a pipe that never comes up settles ON ITS OWN', async () => {
+  // The bug this replaces. A request queued on a pipe that never becomes
+  // writable, with the process still alive, is owed to nobody: no 'exit' (so no
+  // restart and no give-up), no 'spawn'/'ready' (so no flush), and once the
+  // flush-retry budget is spent no timer is left to try. The old version of this
+  // test asserted the queue was still there after 400 ticks and then *called
+  // q.startBridge() by hand* — which rescued the payload and proved only that
+  // the queue was not dropped, not that anything would ever collect it. It
+  // passed while the promise hung forever.
+  //
+  // So: nothing below touches the queue. The module's own machinery has to
+  // settle it.
   const { q, state, last, mod } = loadQueue();
   q.startBridge();
   const first = last();
   first.emit('spawn');
-  first.stdin.writable = false;
-  const p = watch(q.callBackend('list_profiles'));
+  first.stdin.writable = false; // the pipe never comes up; the process never exits
+  let exits = 0;
+  first.on('exit', () => { exits += 1; });
+  // The deadline is generous because a slow machine must not turn a working
+  // fix into a failure; the assertion is that it settles at all, long before
+  // this, on the module's own budget of ~60ms here (~1s as shipped).
+  const p = watch(q.callBackend('list_profiles'), 1000);
+  assert.equal(q.queuedIds().length, 1, 'precondition: the payload is queued');
+
+  // Many times the whole budget (FLUSH_RETRY_MAX * FLUSH_RETRY_MS), on the real
+  // clock. No rescue is offered.
+  await tick(mod.FLUSH_RETRY_MAX * mod.FLUSH_RETRY_MS * 4 + 60);
+  const r = await p;
+  assertSettled(r, 'the payload stranded on a pipe that never opened');
+  assert.equal(r.ok, false, 'a payload that can never be sent must reject, not hang');
+  assert.match(r.e.message, /could not be started/);
+  assert.equal(q.queuedIds().length, 0, 'the stranded queue must be cleared');
+  assert.equal(q.pendingCount(), 0, 'and its pending promise with it');
+  assert.equal(q.isStopped(), true, 'the give-up latch must hold');
+  assert.equal(state.gives.length, 1, 'the user must be asked exactly once');
+  assert.equal(state.gives[0].consecutiveFailures, 0,
+    'the dialog must be able to tell this apart from a run of failed starts');
+  assert.equal(state.notifications.length, 1, 'the renderer must be told');
+  assert.equal(state.quits, 1, 'declining the dialog quits, like any other give-up');
+  assert.equal(exits, 1, 'the stuck child must be killed, not orphaned');
+  assert.equal(first.written.length, 0, 'nothing may be written to a dead pipe');
+
+  // And the app is left in a state a human can act on: new work fails fast
+  // instead of joining a queue nothing will ever drain.
+  const after = await watch(q.callBackend('list_profiles'), 100);
+  assert.equal(after.ok, false, 'a post-give-up request must not queue');
+  assert.match(after.e.message, /could not be started/);
+  assert.equal(q.queuedIds().length, 0);
+});
+
+test('(m3) the retry budget is spent exactly once, then it gives up', async () => {
+  // (m2) proves the request settles; this pins *where the line is*, so the fix
+  // cannot be a band-aid that gives up on the first retry (which would throw
+  // away a payload whose pipe is merely slow to open) or that never gives up.
+  // Driven on a manual clock so "19 rounds" and "the 20th round" are exact.
+  const clk = manualClock();
+  const { q, state, last, mod } = loadQueue({ deps: { timers: clk.timers } });
+  q.startBridge();
+  const child = last();
+  child.emit('spawn');
+  child.stdin.writable = false;
+  let exits = 0;
+  child.on('exit', () => { exits += 1; });
+  const p = watch(q.callBackend('import_profile', { dest: '/tmp/x' }), 5000);
   assert.equal(q.queuedIds().length, 1);
 
-  // Long enough for the whole budget to be spent many times over.
-  await tick(400);
-  assert.equal(q.queuedIds().length, 1, 'the queue must still be owed, not dropped');
-  assert.equal(q.pendingCount(), 1);
-  assert.equal(first.written.length, 0);
+  // Every round but the last: still owed, still polling, nothing settled.
+  await clk.advance(mod.FLUSH_RETRY_MS * (mod.FLUSH_RETRY_MAX - 1));
+  assert.equal(q.queuedIds().length, 1, 'the payload was dropped while the budget remained');
+  assert.equal(state.gives.length, 0, 'gave up before the budget was spent');
+  assert.equal(exits, 0, 'killed the child while it still had budget left');
+  assert.equal(q.isStopped(), false);
 
-  // A late pipe recovery is still picked up by the restart path, not lost.
+  // The round that spends it.
+  await clk.advance(mod.FLUSH_RETRY_MS);
+  const r = await p;
+  assertSettled(r, 'the payload at the end of the retry budget');
+  assert.equal(r.ok, false);
+  assert.match(r.e.message, /could not be started/);
+  assert.equal(state.gives.length, 1, 'the exhausted budget must reach the give-up path');
+  assert.equal(exits, 1, 'the child that owns the dead pipe must be killed');
+  assert.equal(q.queuedIds().length, 0);
+  assert.equal(q.pendingCount(), 0);
+  assert.equal(clk.pending(), 0, 'no timer may be left polling after the give-up');
+
+  // Idempotent: a second look at an exhausted budget must not raise a second
+  // dialog for the same failure.
+  q.scheduleFlushRetry();
+  await tick();
+  assert.equal(state.gives.length, 1, 'the give-up was reached more than once');
+});
+
+test('(m4) a new process gets a fresh retry budget', async () => {
+  // The budget is per bridge process, so a queue that outlives one process must
+  // not arrive at the next one already spent. Without the reset, the ~1s spent
+  // polling a dead pipe is carried over and the replacement bridge is given up
+  // on within a single retry — a healthy bridge condemned by the previous one's
+  // bad second.
+  const clk = manualClock();
+  const { q, state, last, mod } = loadQueue({ deps: { timers: clk.timers } });
   q.startBridge();
+  const first = last();
+  first.emit('spawn');
+  first.stdin.writable = false;
+  const p = watch(q.callBackend('export_profile', { name: 'e' }), 5000);
+
+  // Burn all but one retry of the budget on the first process.
+  await clk.advance(mod.FLUSH_RETRY_MS * (mod.FLUSH_RETRY_MAX - 1));
+  assert.equal(state.gives.length, 0, 'precondition: the budget is not spent yet');
+
+  // The process dies; the restart path brings up a replacement that is also
+  // unusable (a spawn that hands back a dead stdin, but no 'error' this time,
+  // so the queue is still owed when the new one appears).
+  state.deadStdin = true;
+  first.kill('SIGPIPE');
+  await clk.advance(mod.BRIDGE_BACKOFF_BASE_MS);
   const second = last();
-  second.emit('spawn');
-  await tick(10);
-  assert.equal(second.written.length, 1, 'a working bridge must pick up the owed payload');
+  assert.notEqual(second, first, 'precondition: a replacement process was spawned');
+  assert.equal(second.stdin.writable, false, 'precondition: its pipe is dead too');
+  assert.equal(q.queuedIds().length, 1, 'the queue is still owed across the restart');
+
+  // The budget belongs to the new process, so a few rounds of it are still owed.
+  await clk.advance(mod.FLUSH_RETRY_MS * 3);
+  assert.equal(state.gives.length, 0,
+    'the replacement bridge inherited the previous process\'s spent budget');
+  assert.equal(q.isStopped(), false, 'a fresh bridge was given up on too early');
+  assert.equal(q.queuedIds().length, 1, 'the queue must still be intact');
+  assert.equal(second.written.length, 0, 'nothing may be written to a dead pipe');
+
+  // …and it still works when the pipe finally opens.
+  state.deadStdin = false;
+  second.stdin.writable = true;
+  await clk.advance(mod.FLUSH_RETRY_MS);
+  assert.equal(second.written.length, 1, 'the payload was not retried on the new bridge');
   second.respond(second.requests[0].id, { ok: 1 });
   const r = await p;
-  assertSettled(r, 'the request recovered by a later bridge');
+  assertSettled(r, 'the payload that survived a restart with a spent budget');
   assert.equal(r.ok, true);
-  void mod;
+  assert.equal(state.gives.length, 0);
+});
+
+test('(m5) a scheduled restart outranks the budget: no give-up mid-restart', async () => {
+  // The race the give-up introduced, and one tests/test_bridge_queue_e2e.mjs
+  // really does hit against the shipped constants: the first backoff (1s) and
+  // the entire flush budget (20 * 50ms) are the same length, so a broken pipe
+  // plus a crash with a payload in the queue puts the two on the same second.
+  // If the give-up wins, a request a replacement bridge was one timer from
+  // delivering is rejected instead. While a restart is scheduled, the restart
+  // owns the queue.
+  //
+  // The clock is parked so the last budget round lands *before* the replacement
+  // does — otherwise the restart trivially wins and this test proves nothing.
+  const clk = manualClock();
+  const { q, state, last, mod } = loadQueue({ deps: { timers: clk.timers } });
+  assert.ok(mod.BRIDGE_BACKOFF_BASE_MS > 1,
+    'precondition: the backoff is longer than one tick, so a round can be placed inside it');
+  q.startBridge();
+  const first = last();
+  first.emit('spawn');
+  first.stdin.writable = false;
+  const p = watch(q.callBackend('list_profiles'), 5000);
+  assert.equal(q.queuedIds().length, 1);
+
+  // All but the last round of the budget, then park the clock one tick short of
+  // the final round.
+  await clk.advance(mod.FLUSH_RETRY_MS * (mod.FLUSH_RETRY_MAX - 1));
+  await clk.advance(mod.FLUSH_RETRY_MS - 1);
+  assert.equal(state.gives.length, 0, 'precondition: the budget is one round from spent');
+  assert.equal(q.queuedIds().length, 1, 'precondition: the payload is still owed');
+
+  // The process dies, so a replacement is scheduled for +BRIDGE_BACKOFF_BASE_MS
+  // — strictly after the final round, which is now due.
+  first.kill('SIGKILL');
+  // One more tick puts the clock exactly on the final round: it fires with the
+  // replacement still pending.
+  await clk.advance(1);
+  assert.equal(state.gives.length, 0,
+    'the queue was given up while a replacement bridge was already scheduled');
+  assert.equal(q.isStopped(), false);
+  assert.equal(state.children.length, 1, 'precondition: the replacement has not arrived yet');
+
+  // …and when it does arrive, it takes the payload.
+  await clk.advance(mod.BRIDGE_BACKOFF_BASE_MS);
+  const second = last();
+  assert.notEqual(second, first, 'the replacement bridge was never spawned');
+  assert.equal(second.written.length, 1, 'the replacement must deliver the owed payload');
+  assert.equal(q.queuedIds().length, 0);
+  second.respond(second.requests[0].id, { n: 1 });
+  const r = await p;
+  assertSettled(r, 'the payload delivered across a restart that was pending at the budget limit');
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.v, { n: 1 });
 });
 
 test('(n) flushQueue on a dead pipe writes nothing and drops nothing', async () => {
@@ -684,6 +949,10 @@ test('(o) main.js delegates to bridge_queue instead of re-implementing it', asyn
   assert.match(code, /onQuit: \(\) => app\.quit\(\)/);
   assert.match(code, /response === 0 \? 'retry' : 'quit'/);
   assert.match(code, /bridgeQueue\.dispose\(\)/, 'the quit handler must dispose the queue');
+  // A give-up is not always a run of failed starts, so the dialog must not
+  // hardcode the failure count; it reads the count the queue reports.
+  assert.match(code, /consecutiveFailures >= BRIDGE_MAX_FAILURES/,
+    'the give-up dialog must distinguish the two give-up paths');
 });
 
 test('(k) dispose() clears timers and kills the child; no further spawns', async () => {

@@ -303,13 +303,20 @@ const bridgeQueue = createBridgeQueue({
   // Forward Python tracebacks to console in dev
   forwardStderr: (d) => { if (!app.isPackaged) process.stderr.write(d); },
   notifyRenderer: ({ reason, message }) => mainWindow?.webContents.send('bridge:failed', { reason, message }),
-  onGiveUp: async ({ message }) => {
+  onGiveUp: async ({ message, consecutiveFailures }) => {
+    // `consecutiveFailures` is not always `BRIDGE_MAX_FAILURES`: a request
+    // stranded on a pipe that never opened gives up without the bridge ever
+    // failing to start. Claiming "5 times in a row" there would be a lie the
+    // user can see through.
+    const because = consecutiveFailures >= BRIDGE_MAX_FAILURES
+      ? `It failed to start ${BRIDGE_MAX_FAILURES} times in a row. `
+      : 'It started, but stopped accepting requests. ';
     const { response } = await dialog.showMessageBox({
       type: 'error',
       title: 'Backend unavailable',
       message: 'Chrome Isolation could not start its background service.',
       detail: `${message}\n\n` +
-              `It failed to start ${BRIDGE_MAX_FAILURES} times in a row. ` +
+              because +
               'Any action that was in flight has been cancelled — please retry it.\n\n' +
               'Common causes: the bundled bridge is missing or not executable, ' +
               'Python is not installed, or the app directory is read-only.',
