@@ -16,12 +16,34 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def _spawn_bridge():
+    """
+    Spawn the real bridge against a SANDBOXED home, never the user's.
+
+    This test exercises create_profile/delete_profile, which write the registry
+    and `shutil.rmtree` the profile directory. Run against the real $HOME it
+    operated on the user's live profile store: on 2026-09-29 it removed three
+    real profiles (Fiverr-Demo, Fiverr-Read, Zoom-1) along with the throwaway
+    it was cleaning up. Redirection is the only safe answer -- do not "fix" a
+    future side-effect report by stubbing delete_profile instead, because the
+    point of this test is that delete_profile really deletes.
+
+    config.py derives APP_DATA_DIR, REGISTRY_FILE, CHROME_PROFILES_DIR and
+    HOST_SHARES_DIR from $HOME at import, so overriding HOME in the child's
+    environment puts all of them inside the sandbox. CHROME_ISOLATION_HOME is
+    cleared too, since it takes precedence over $HOME.
+    """
+    sandbox = tempfile.mkdtemp(prefix='bridge-home-')
+    home = os.path.join(sandbox, 'home')
+    os.makedirs(home, exist_ok=True)
+    env = dict(os.environ)
+    env['HOME'] = home
+    env.pop('CHROME_ISOLATION_HOME', None)
     return subprocess.Popen(
         [sys.executable, os.path.join(ROOT, 'backend', 'bridge.py')],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        text=True, cwd=ROOT,
+        text=True, cwd=ROOT, env=env,
     )
 
 
