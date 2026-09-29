@@ -263,6 +263,81 @@ def test_start_container_hardened():
     assert kwargs.get('network_mode') in (None, 'default', 'bridge'), kwargs
     assert 'ipc_mode' not in kwargs, kwargs
 
+    # ---- H1: the tmpfs set must reach `docker run` (not just _build_tmpfs) --
+    #
+    # test_tmpfs_set_is_sufficient() exercises DockerManager._build_tmpfs()
+    # in isolation, which is a good test of the DICT and completely blind to
+    # whether the launch uses it. `tmpfs=` is passed to containers.run() at
+    # exactly one place, and mutation of that line to `tmpfs=None` used to
+    # leave this whole suite green. That is the most load-bearing claim in the
+    # hardening: read_only=True with no writable scratch means Chromium has
+    # nowhere to stage its profile lock, Crashpad handler, or shader cache, and
+    # the browser simply fails to cold-start — a bricked product that no test
+    # noticed. So assert on the value that actually reached the API, not on the
+    # helper's return value.
+    tmpfs = kwargs.get('tmpfs')
+    assert tmpfs is not None, (
+        'tmpfs must be passed to containers.run(); with read_only=True and no '
+        'writable scratch Chromium cannot cold-start '
+        f'(read_only={kwargs.get("read_only")!r}, tmpfs={tmpfs!r})'
+    )
+    assert isinstance(tmpfs, (dict, set, frozenset, list, tuple)), \
+        f'tmpfs must be a mapping or a collection of paths, got {type(tmpfs)}'
+    # docker-py accepts a dict {path: options} or a list of paths; normalise
+    # both to a set of paths so the assertion is about the paths themselves.
+    paths = set(tmpfs)
+    # Pinned to literals, never to DockerManager._TMPFS / _build_tmpfs():
+    # comparing the code to itself passes for any value at all, which is
+    # exactly how the tmpfs=None mutation slipped through.
+    required_tmpfs = {
+        '/tmp', '/run', '/var/tmp',
+        '/home/chrome/.cache', '/home/chrome/.local',
+        '/home/chrome/.runtime',
+    }
+    missing = required_tmpfs - paths
+    assert not missing, (
+        f'these paths must be tmpfs-mounted for a read-only rootfs: '
+        f'{sorted(missing)}; got {sorted(paths)}'
+    )
+    # The tmpfs must be a mapping carrying mount options, not a bare list of
+    # paths: a list would mount them all with Docker's permissive defaults,
+    # losing nosuid/nodev/noexec/size on every one of them.
+    assert isinstance(tmpfs, dict), (
+        'tmpfs must be the {path: options} mapping from _build_tmpfs(), not a '
+        f'bare list of paths, or the nosuid/nodev/noexec/size flags are all '
+        f'dropped: {tmpfs!r}'
+    )
+    # And the scratch the browser needs must be owned by the uid we pin below,
+    # or a read-only-rootfs browser cannot write its own cache.
+    assert 'uid=1000' in tmpfs['/home/chrome/.cache'], tmpfs['/home/chrome/.cache']
+
+    # ---- H2: the non-root boundary must be pinned at the CALL SITE ---------
+    #
+    # Without this, the container runs as uid 1000 only because the Dockerfile
+    # says `USER chrome` — a build-time knob nobody controls at runtime.
+    # `cap_drop=ALL` and `no-new-privileges` do NOT stop a root-owned process
+    # from writing the profile bind mount, the Downloads bind mount,
+    # /dev/shm and /dev/dri, so a rebuilt or swapped image would silently
+    # remove the non-root boundary with zero test signal. Adding user='root'
+    # to run_kwargs used to leave this suite green. Pinned to the literal.
+    assert kwargs.get('user') == '1000:1000', (
+        'the container must be pinned to a non-root user at the call site, not '
+        f"left to the image's USER directive: got {kwargs.get('user')!r}"
+    )
+    # Belt and braces: reject the two specific fail-open values, so a future
+    # edit cannot reintroduce root by some spelling that is not literally
+    # 'root' (e.g. '0', '0:0', 'root:root').
+    usr = str(kwargs.get('user', ''))
+    assert usr not in ('root', '0', '0:0', 'root:root', ''), \
+        f'container must not run as root: {usr!r}'
+    assert not usr.startswith('0'), f'container uid must not be 0: {usr!r}'
+    # The pinned uid is the same one the tmpfs scratch is created with, so the
+    # two hardening decisions cannot drift apart into a bricked browser.
+    pinned_uid = usr.split(':')[0]
+    for path in ('/home/chrome/.cache', '/home/chrome/.local',
+                 '/home/chrome/.runtime'):
+        assert f'uid={pinned_uid}' in tmpfs[path], (path, tmpfs[path], pinned_uid)
+
 
 def test_start_container_ulimits_include_nproc():
     kwargs = _run_kwargs_for()
@@ -334,9 +409,11 @@ def test_start_container_command():
         assert 'dns' not in kwargs, kwargs
         assert 'dns_opt' not in kwargs, kwargs
 
-        # devices only when /dev/dri exists on the host
+        # devices only when /dev/dri exists on the host. The value is now the
+        # explicit three-field spec (see L2 note below); asserted to the
+        # literal, exactly as strictly as the old bare-path assertion was.
         if os.path.exists('/dev/dri'):
-            assert kwargs.get('devices') == ['/dev/dri'], kwargs
+            assert kwargs.get('devices') == ['/dev/dri:/dev/dri:rw'], kwargs
         else:
             assert 'devices' not in kwargs, kwargs
 
@@ -348,6 +425,98 @@ def test_start_container_command():
             assert 'audio' not in kwargs['group_add'], kwargs
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_start_container_gpu_device_permissions():
+    """L2: the /dev/dri device mapping must grant read+write, and must NOT
+    grant mknod.
+
+    The module docstring used to claim "GPU access via /dev/dri (read-only for
+    display, rw for render)". That was never true. A bare '/dev/dri' string is
+    expanded by docker-py's parse_devices() into
+    CgroupPermissions='rwm' over the whole tree, card*/renderD* — including
+    the primary control node — so the code and the comment disagreed, and in
+    the direction of granting more than described.
+
+    Read+WRITE is deliberate and required: libdrm opens the render node
+    O_RDWR and Mesa/GBM's drmPrimeHandleToFD() needs a writable fd, so
+    tightening this to 'r' would not harden the GPU, it would silently fall
+    back to llvmpipe and regress the acceleration T2 verified. What is dropped
+    is only the 'm' (mknod) bit, which no GPU code path ever uses and which
+    cap_drop=ALL already denies anyway. So the assertion pins BOTH halves: rw
+    is granted, m is not.
+    """
+    from docker.utils.utils import parse_devices
+
+    kwargs = _run_kwargs_for()
+
+    if not os.path.exists('/dev/dri'):
+        # No GPU on this host: there must be no device mapping at all.
+        assert 'devices' not in kwargs, kwargs
+        return
+
+    devices = kwargs.get('devices')
+    # Pinned to the literal, not to docker_manager.GPU_DEVICE_SPEC: comparing
+    # the code to itself passes for any value at all.
+    assert devices == ['/dev/dri:/dev/dri:rw'], devices
+
+    # Assert the EFFECTIVE permission, not just the string, by running the
+    # spec through docker-py's own parser. This is the assertion that catches
+    # the two-footgun failure modes a plain string equality cannot see:
+    #   * '/dev/dri:rw'  parses as host='/dev/dri', container_path='rw',
+    #                    permissions defaulted back to 'rwm' — it would create
+    #                    a device node at the literal path /rw and restrict
+    #                    nothing at all;
+    #   * a future docker-py that changes the default for a two-field string
+    #                    would silently re-widen this to rwm.
+    parsed = parse_devices(devices)
+    assert len(parsed) == 1, parsed
+    dev = parsed[0]
+    assert dev['PathOnHost'] == '/dev/dri', dev
+    # Not the 'rw' footgun: the container path must still be the real path.
+    assert dev['PathInContainer'] == '/dev/dri', dev
+    perms = dev['CgroupPermissions']
+    assert perms == 'rw', (
+        f'/dev/dri must be mapped read-write (libdrm opens the render node '
+        f'O_RDWR; read-only would regress GPU accel to llvmpipe): {dev}'
+    )
+    # And the mknod bit must NOT be granted. cap_drop=ALL already strips
+    # CAP_MKNOD so mknod(2) would fail regardless — this is defence in depth,
+    # asserting that the boundary does not silently re-widen if the capability
+    # drop is ever relaxed, and that nobody re-inherits the rwm default.
+    assert 'm' not in perms, (
+        f'/dev/dri must not be mknod-capable (docker-py defaults a bare device '
+        f'string to rwm): {dev}'
+    )
+    assert 'r' in perms and 'w' in perms, dev
+
+
+def test_gpu_device_spec_comment_matches_behaviour():
+    """The module docstring must not claim less access than the code grants.
+
+    The regression this guards is a documentation/layer disagreement, so the
+    check is textual: if the code ever goes back to a bare '/dev/dri' (rwm)
+    while the docstring describes something narrower, or vice versa, one of the
+    two tests above has to notice. Here we only assert that the code and the
+    shipped constant cannot drift apart — the constant IS what is passed to
+    containers.run.
+    """
+    import re
+    spec = docker_manager.GPU_DEVICE_SPEC
+    assert spec == '/dev/dri:/dev/dri:rw', spec
+    # Three colon-separated fields: host, container, permissions. Fewer than
+    # three means the permission field is being silently ignored by
+    # parse_devices(), which is the '/dev/dri:rw' footgun.
+    assert len(spec.split(':')) == 3, spec
+    assert re.fullmatch(r'/dev/dri:/dev/dri:rwm?', spec), spec
+    # The docstring must point at the constant rather than restate a claim
+    # that can rot.
+    doc = docker_manager.__doc__ or ''
+    assert 'GPU_DEVICE_SPEC' in doc, 'docstring must reference GPU_DEVICE_SPEC'
+    assert 'read-only for display' in doc and 'never true' in doc, (
+        'the docstring should record that the old "read-only for display" '
+        'claim was incorrect, so the correction is auditable'
+    )
 
 
 def test_start_container_proxy():
