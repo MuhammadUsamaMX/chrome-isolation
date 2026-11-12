@@ -62,6 +62,11 @@ _METHODS = {
     "image_update_apply":  lambda p: image_update.apply_update(
         version=p.get("version"), reason="user_consent"),
     "image_update_status": lambda p: image_update.get_update_status(),
+    # Manual, forced rebuild of the browser image from the shipped Dockerfile.
+    # Used to move off an end-of-life base OS (e.g. Alpine 3.19 -> 3.24) without
+    # waiting for a Chromium version bump. Goes through the same lock/verify/promote
+    # path as a consented update, so the running image is never at risk.
+    "rebuild_image":      lambda p: image_update.check_and_start(force=True, reason="manual_rebuild"),
 }
 
 

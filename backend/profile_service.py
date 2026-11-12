@@ -236,6 +236,18 @@ def delete_profile(name: str) -> dict:
     if os.path.isdir(path):
         shutil.rmtree(path)
 
+    # Clean up the per-profile host-share directory created on demand by
+    # host_share.ensure_host_share_dir(). delete_profile used to leave this
+    # behind, leaking empty directories for deleted profiles.
+    try:
+        import host_share
+        share = host_share.host_share_dir(name)
+        if os.path.isdir(share) and os.path.realpath(share).startswith(
+                os.path.realpath(host_share.HOST_SHARES_DIR) + os.sep):
+            shutil.rmtree(share, ignore_errors=True)
+    except Exception:
+        pass
+
     unregister_profile(name)
     return {"status": "deleted", "name": name}
 

@@ -31,7 +31,7 @@ RUN cc -O2 -Wall -fPIC -shared -o /libhwspoof.so /src/libhwspoof.c \
 # and they are measured end-to-end by scripts/verify.sh check 4, not here.
 RUN set -eu; \
     probe="$(mktemp)"; \
-    LD_PRELOAD=/lib/hwspoof.so CHROME_SPOOF_PROBE="$probe" /bin/true >/dev/null 2>&1 || true; \
+    LD_PRELOAD=/libhwspoof.so CHROME_SPOOF_PROBE="$probe" /bin/true >/dev/null 2>&1 || true; \
     got="$(cat "$probe" 2>/dev/null || true)"; \
     if [ "$got" != "loaded" ]; then \
         echo "FATAL: built shim did not self-test (probe said '$got')" >&2; \

@@ -839,6 +839,16 @@ function renderUpdate() {
     applyBtn.disabled = false;
   }
 
+  // Manual base-image rebuild. Offered when the base OS is end-of-life (or on
+  // demand). It rebuilds from the shipped Dockerfile and promotes only after
+  // the new image passes verification, so the running image is never at risk.
+  const rebuildBtn = document.getElementById('btnRebuildBase');
+  const showRebuild = !!(s && (s.state === 'base_eol' || s.state === 'up_to_date'
+                               || s.state === 'update_available' || s.state === 'unknown')
+                       && !applyInFlight && !(s && UPDATE_ACTIVE_STATES.has(s.state)));
+  rebuildBtn.hidden = !showRebuild;
+  rebuildBtn.disabled = !!(s && UPDATE_ACTIVE_STATES.has(s.state)) || applyInFlight;
+
   document.getElementById('btnCheckUpdate').disabled =
     !!(s && UPDATE_ACTIVE_STATES.has(s.state)) || applyInFlight;
 }
@@ -868,6 +878,30 @@ document.getElementById('btnUpdatePanelClose')?.addEventListener('click', () => 
 });
 
 document.getElementById('btnApplyUpdate')?.addEventListener('click', applyConsentedUpdate);
+
+document.getElementById('btnRebuildBase')?.addEventListener('click', async () => {
+  if (applyInFlight) return;
+  const ok = await confirm('Rebuild base image',
+    'This rebuilds the browser image from the shipped Dockerfile (which may move the base OS, e.g. Alpine 3.19 → 3.24) and replaces :latest only after the new image passes verification. Your current image stays untouched until then. Continue?');
+  if (!ok) return;
+  applyInFlight = true;
+  renderUpdate();
+  let result = null;
+  try {
+    result = await window.api.image.rebuild();
+  } catch (e) {
+    result = null;
+    toast(`Rebuild failed: ${e.message}`, 'error');
+  }
+  applyInFlight = false;
+  if (result && result.status) updateStatus = result.status;
+  await refreshUpdateStatus(false);
+  if (result && result.started === false) {
+    toast(`Rebuild not started: ${result.detail || result.reason || 'refused'}`, 'error', 8000);
+  } else {
+    toast('Rebuilding the base image. Your current image stays untouched until the new one is verified.', 'success');
+  }
+});
 
 // "Check for updates" DETECTS ONLY. It never builds: a rebuild needs the
 // Apply button, which carries the versioned consent.

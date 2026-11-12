@@ -46,9 +46,10 @@ contextBridge.exposeInMainWorld('api', {
   // handler in main.js. Note `update_available` is tri-state: true, false, or
   // null for "could not determine" — do not render null as "up to date".
   image: {
-    check:  ()              => ipcRenderer.invoke('image:checkUpdate'),
-    apply:  (version)       => ipcRenderer.invoke('image:applyUpdate', version),
-    status: ()              => ipcRenderer.invoke('image:updateStatus'),
+    check:   ()              => ipcRenderer.invoke('image:checkUpdate'),
+    apply:   (version)       => ipcRenderer.invoke('image:applyUpdate', version),
+    rebuild: ()              => ipcRenderer.invoke('image:rebuildImage'),
+    status:  ()              => ipcRenderer.invoke('image:updateStatus'),
   },
 
   // Backend bridge lifecycle (F8 / T6). Fired when the Python bridge could not

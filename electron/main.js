@@ -481,6 +481,10 @@ function registerIpc() {
   //   retry_in_seconds   number | null
   ipcMain.handle('image:updateStatus', () => callBackend('image_update_status', {}));
 
+  // Manual, forced rebuild from the shipped Dockerfile. Used to move off an
+  // end-of-life base OS. Goes through the same lock/verify/promote path.
+  ipcMain.handle('image:rebuildImage', () => callBackend('rebuild_image', {}));
+
   // Export — open native save dialog, then call backend
   ipcMain.handle('profiles:export', async (_, name) => {
     const { filePath, canceled } = await dialog.showSaveDialog(mainWindow, {
